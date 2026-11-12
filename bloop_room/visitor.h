@@ -75,6 +75,9 @@ struct Visitor {
   float hopCool, heartCool, bubbleT;
   const char *bubble;
   uint8_t feel;             // FEEL_*: its reaction to what just happened in the room
+  float enterT, exitT;      // seconds left of hopping in / out through the door (0 = not)
+  float walkSecs;           // how long this walk takes in all
+  Vec2 pathFrom, pathTo;    // where the walk starts and ends
   float feelT;              // seconds that reaction lasts
   uint32_t seenDecisions;   // Bloop's choice count when Pip last looked
   float coachT;             // counts down to Pip judging Bloop's newest choice
@@ -249,6 +252,8 @@ void visitorTalk(float dt) {
 // Switch the radio on (it never joins a network, it only listens for Pip).
 void visitorBegin() {
   pip.here = false;
+  pip.enterT = pip.exitT = 0;
+  pip.walkSecs = 1;
   pipLessonsTotal = pipLessonsSaved = prefs.getUInt("pipLessons", 0);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
@@ -270,10 +275,82 @@ void visitorPuff() {
   }
 }
 
-void visitorArrive() {
-  Vec2 p = ceilingSpot();
-  bodyInit(pip.body, BODY_BALL, p.x, p.y, 17, 0.35f, 6);
+// ---- The door ----
+// Pip doesn't just appear: a door opens in the wall at floor level and Pip hops in
+// through it, and hops back out the same way when it leaves.
+uint8_t doorWall = WALL_B;   // which wall was the floor when the door last opened
+float doorShowT = 0;         // seconds the door stays drawn
+
+// A spot on the floor, `inward` pixels into the room from the door (negative = outside).
+Vec2 doorSpot(float inward) {
+  const float r = 17;   // Pip's size
+  switch (doorWall) {
+    case WALL_B: return v2(ROOM_L + inward, ROOM_B - r);
+    case WALL_T: return v2(ROOM_L + inward, ROOM_T + r);
+    case WALL_L: return v2(ROOM_L + r, ROOM_T + inward);
+    default:     return v2(ROOM_R - r, ROOM_T + inward);
+  }
+}
+
+void visitorWalkIn() {
+  doorWall = floorWall(gScreen);
+  pip.pathFrom = doorSpot(-26);
+  pip.pathTo = doorSpot(52);
+  bodyInit(pip.body, BODY_BALL, pip.pathFrom.x, pip.pathFrom.y, 17, 0.35f, 6);
   pip.body.stick = 0.2f;
+  pip.walkSecs = pip.enterT = 1.6f;
+  pip.exitT = 0;
+  doorShowT = pip.walkSecs + 0.5f;
+}
+
+void visitorWalkOut() {
+  doorWall = floorWall(gScreen);
+  pip.pathFrom = v2(pip.body.x, pip.body.y);
+  pip.pathTo = doorSpot(-26);
+  float far = vlen(v2(pip.pathTo.x - pip.pathFrom.x, pip.pathTo.y - pip.pathFrom.y));
+  pip.walkSecs = pip.exitT = clampf(far / 150.0f, 0.8f, 2.4f);
+  pip.enterT = 0;
+  doorShowT = pip.walkSecs + 0.4f;
+}
+
+// Once a frame: move Pip along its way in or out. True while it is on the way
+// (it isn't pushed about by the room until it's properly inside).
+bool visitorWalking(float dt) {
+  doorShowT -= dt;
+  bool in = pip.enterT > 0;
+  if (!in && pip.exitT <= 0) return false;
+  float &t = in ? pip.enterT : pip.exitT;
+  t -= dt;
+  float u = clampf(1.0f - t / pip.walkSecs, 0, 1);
+  Vec2 n = wallNormal(doorWall);
+  float hops = fmaxf(2, roundf(pip.walkSecs * 2.5f));
+  float hop = fabsf(sinf(u * PI * hops)) * 12;   // little hops along the floor
+  Body &b = pip.body;
+  b.x = pip.pathFrom.x + (pip.pathTo.x - pip.pathFrom.x) * u + n.x * hop;
+  b.y = pip.pathFrom.y + (pip.pathTo.y - pip.pathFrom.y) * u + n.y * hop;
+  b.vx = b.vy = 0;
+  b.touching = 0;
+  b.impact = 0;
+  if (t <= 0) t = 0;
+  return t > 0;
+}
+
+void drawDoor() {
+  if (doorShowT <= 0) return;
+  const uint16_t dark = rgb(34, 26, 40), frame = rgb(150, 110, 70);
+  int x, y, w, h;
+  switch (doorWall) {
+    case WALL_B: x = 0; y = (int)ROOM_B - 48; w = (int)ROOM_L + 6; h = 48; break;
+    case WALL_T: x = 0; y = (int)ROOM_T; w = (int)ROOM_L + 6; h = 48; break;
+    case WALL_L: x = (int)ROOM_L; y = HUD_H; w = 48; h = (int)ROOM_T - HUD_H + 6; break;
+    default:     x = (int)ROOM_R - 48; y = HUD_H; w = 48; h = (int)ROOM_T - HUD_H + 6; break;
+  }
+  cv->fillRect(x, y, w, h, dark);
+  cv->drawRect(x, y, w, h, frame);
+}
+
+void visitorArrive() {
+  visitorWalkIn();
   pip.here = true;
   palPlace = PLACE_BLOOPS;
   placeT = frand(50, 75);
@@ -287,7 +364,6 @@ void visitorArrive() {
   pip.coachT = -1;
   pip.coachCool = 5.0f;   // say hello first, teach after
   pip.lessons = 0;
-  visitorPuff();
   pet.joy = clampf(pet.joy + 15, 0, 100);
   chatT = frand(20, 30);
   replyT = -1;
@@ -302,7 +378,7 @@ void visitorArrive() {
 }
 
 void visitorLeave() {
-  if (palPlace == PLACE_BLOOPS) visitorPuff();
+  if (palPlace == PLACE_BLOOPS) visitorWalkOut();   // it hops out through the door
   visitorSaveLessons();
   pip.here = false;
   palPlace = PLACE_BLOOPS;   // Bloop is back in its own room
@@ -550,24 +626,21 @@ void visitorTakeTurns(float dt) {
   if (palPlace == PLACE_BLOOPS) {
     // Off to Pip's. (Not while Bloop is asleep or in your hand.)
     if (pet.asleep || pet.held) { placeT = 10; return; }
-    visitorPuff();
+    visitorWalkOut();
     bloopPuff();
     palPlace = PLACE_PIPS;
     placeT = frand(40, 60);
     sendEvent("to_pips_room", 0);
   } else {
-    // Back to Bloop's: Bloop pops up where it was, Pip drops in again.
+    // Back to Bloop's: Bloop pops up where it was, Pip hops in through the door again.
     palPlace = PLACE_BLOOPS;
     placeT = frand(50, 75);
-    Vec2 p = ceilingSpot();
-    bodyInit(pip.body, BODY_BALL, p.x, p.y, 17, 0.35f, 6);
-    pip.body.stick = 0.2f;
+    visitorWalkIn();
     pip.hopCool = 1.5f;
     pip.seenDecisions = brain.decisions;
     pip.coachT = -1;
     coachWait = -1;
     pip.coachCool = 3.0f;
-    visitorPuff();
     bloopPuff();
     sendEvent("to_bloops_room", 0);
   }
@@ -579,6 +652,7 @@ void visitorUpdate(float dt) {
   visitorRadio(dt);
   pipLessonsSaveT += dt;
   if (pipLessonsSaveT > 30) { pipLessonsSaveT = 0; visitorSaveLessons(); }   // at most every 30 s
+  visitorWalking(dt);
   if (!pip.here) return;
   visitorTakeTurns(dt);
   if (palPlace == PLACE_PIPS) {   // both are over at Pip's: only the chatting carries on here
@@ -627,6 +701,7 @@ void visitorUpdate(float dt) {
 // One physics step for Pip: fall, then bump into everything else.
 void visitorStep(Vec2 g, float h) {
   if (!pip.here || palPlace == PLACE_PIPS) return;
+  if (pip.enterT > 0 || pip.exitT > 0) return;   // still coming through the door
   Body &b = pip.body;
   stepBody(b, g, h, floating);
   if (!pet.held && !pet.gripping) collide(pet.body, b, 3.0f, 2.0f);
@@ -646,8 +721,10 @@ void visitorShake() {
 // Pip looks like it does on its own e-paper screen: a white blob with a thick
 // black outline and a little tip on top. Its feet point at the floor, like Bloop's.
 void drawVisitor() {
-  if (!pip.here) return;
-  if (palPlace == PLACE_PIPS) {   // nobody home: a note on the wall
+  bool leaving = pip.exitT > 0;   // still hopping out through the door
+  drawDoor();
+  if (!pip.here && !leaving) return;
+  if (palPlace == PLACE_PIPS && !leaving) {   // nobody home: a note on the wall
     const uint16_t ink = rgb(30, 28, 40);
     int w = 236, h = 62, x = (SCREEN_W - w) / 2, y = (int)(ROOM_T + ROOM_B) / 2 - h / 2;
     cv->fillRoundRect(x, y, w, h, 10, RGB565_WHITE);
