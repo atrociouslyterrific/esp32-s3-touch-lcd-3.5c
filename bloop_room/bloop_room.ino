@@ -113,8 +113,9 @@ int curState = 0;
 bool fingerDown = false;
 float fx = 0, fy = 0, fStartX = 0, fStartY = 0, fvx = 0, fvy = 0;
 uint32_t fStartMs = 0, lastTouchMs = 0;
-enum Grab : uint8_t { GRAB_NONE, GRAB_PET, GRAB_BALL };
+enum Grab : uint8_t { GRAB_NONE, GRAB_PET, GRAB_BALL, GRAB_BED, GRAB_FOOD };
 Grab grabCand = GRAB_NONE;
+int grabFood = -1;          // which snack, when grabCand == GRAB_FOOD
 bool grabbing = false;
 bool petting = false;
 Vec2 callPoint = {SCREEN_W / 2.0f, (ROOM_T + ROOM_B) / 2};
@@ -751,7 +752,24 @@ void updateNeeds(float dt) {
   pet.actionTime += dt;
 }
 
+// Put a body under your finger (kept inside the room) and give it your finger's speed.
+void holdAtFinger(Body &b) {
+  float ex = b.isBox ? b.hw : b.r, ey = b.isBox ? b.hh : b.r;
+  b.x = clampf(fx, ROOM_L + ex, ROOM_R - ex);
+  b.y = clampf(fy, ROOM_T + ey, ROOM_B - ey);
+  b.vx = fvx;
+  b.vy = fvy;
+  b.airTime = 0;
+  b.touching = 0;
+}
+
 void updateWorld(float dt) {
+  // A snack you're holding can get eaten (hand-feeding!) or cleaned up.
+  if (grabCand == GRAB_FOOD && (grabFood < 0 || !food[grabFood].active)) {
+    grabCand = GRAB_NONE;
+    grabbing = false;
+  }
+
   Vec2 g = v2(gScreen.x * PX_PER_G, gScreen.y * PX_PER_G);
   if (floating) { g.x *= FLOAT_GRAVITY; g.y *= FLOAT_GRAVITY; }
 
@@ -790,18 +808,18 @@ void updateWorld(float dt) {
     } else {
       stepBody(pet.body, g, h, floating);
     }
+    // Whatever your finger is holding follows it; everything else falls.
     if (ball.active) {
-      if (grabbing && grabCand == GRAB_BALL) {
-        ball.x = clampf(fx, ROOM_L + ball.r, ROOM_R - ball.r);
-        ball.y = clampf(fy, ROOM_T + ball.r, ROOM_B - ball.r);
-        ball.vx = fvx; ball.vy = fvy;
-      } else {
-        stepBody(ball, g, h, floating);
-      }
+      if (grabbing && grabCand == GRAB_BALL) holdAtFinger(ball);
+      else stepBody(ball, g, h, floating);
     }
-    stepBody(bed, g, h, floating);
-    for (int i = 0; i < MAX_FOOD; i++)
-      if (food[i].active) stepBody(food[i], g, h, floating);
+    if (grabbing && grabCand == GRAB_BED) holdAtFinger(bed);
+    else stepBody(bed, g, h, floating);
+    for (int i = 0; i < MAX_FOOD; i++) {
+      if (!food[i].active) continue;
+      if (grabbing && grabCand == GRAB_FOOD && i == grabFood) holdAtFinger(food[i]);
+      else stepBody(food[i], g, h, floating);
+    }
     resolveContacts();
     visitorStep(g, h);
   }
@@ -1640,8 +1658,18 @@ void readTouch(float dt) {
     if (screen == SCR_MENU) { menuTap(x, y); return; }
 
     lastTouchMs = millis();
+    int f = -1;
+    float fd = 1e9;
+    for (int i = 0; i < MAX_FOOD; i++) {
+      if (!food[i].active) continue;
+      float d = vlen(v2(x - food[i].x, y - food[i].y));
+      if (d < food[i].r + 16 && d < fd) { fd = d; f = i; }
+    }
+    bool onBed = fabsf(x - bed.x) < bed.hw + 8 && fabsf(y - bed.y) < bed.hh + 8;
     if (vlen(v2(x - pet.body.x, y - pet.body.y)) < pet.body.r + 14) grabCand = GRAB_PET;
     else if (ball.active && vlen(v2(x - ball.x, y - ball.y)) < ball.r + 14) grabCand = GRAB_BALL;
+    else if (f >= 0) { grabCand = GRAB_FOOD; grabFood = f; }
+    else if (onBed) grabCand = GRAB_BED;
     else {
       callPoint = v2(x, y);
       spawnParticle(PT_DUST, x, y, 0, 0, 0.4f, rgb(255, 255, 200));
@@ -1679,6 +1707,11 @@ void readTouch(float dt) {
       decideNow = true;
     }
     if (grabbing && grabCand == GRAB_BALL) { ball.vx = fvx; ball.vy = fvy; }
+    if (grabbing && grabCand == GRAB_BED) { bed.vx = fvx * 0.6f; bed.vy = fvy * 0.6f; }   // it's heavy
+    if (grabbing && grabCand == GRAB_FOOD && grabFood >= 0 && food[grabFood].active) {
+      food[grabFood].vx = fvx;
+      food[grabFood].vy = fvy;
+    }
     grabbing = false;
     petting = false;
     grabCand = GRAB_NONE;
