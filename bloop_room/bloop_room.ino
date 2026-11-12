@@ -18,6 +18,9 @@
 #include <Preferences.h>
 #include "world.h"
 #include "brain.h"
+#include "FreeSans9pt7b.h"
+#include "FreeSansBold9pt7b.h"
+#include "FreeSansBold12pt7b.h"
 
 // Board pins are in board.h
 #define LCD_SPI_HZ 80000000     // Waveshare's own firmware runs the screen at 80 MHz
@@ -69,6 +72,13 @@ const char *const TOY_NAMES[NUM_TOYS] = {"BALL", "BLOCK", "BEACH BALL"};
 uint8_t toy = TOY_BALL;
 float toySpin = 0;      // for drawing the block turning
 float bedAngle = PI / 2;
+bool toyOut = true;     // false when the toy is put away
+
+// What Bloop is saying (its language model writes here; see voice.h)
+char sayText[64] = "";
+float sayT = 0;
+int toolFlash = -1;     // toolbar button to highlight after a tap
+uint32_t toolFlashMs = 0;
 
 // Gravity
 float rawA[3] = {0, 0, -1};        // filtered chip readings (g)
@@ -101,6 +111,7 @@ int calStep = 0;
 const char *calMsg = "";
 bool confirmReset = false;
 float saveTimer = 0;
+float physAcc = 0;
 float brainSendTimer = 0;
 char cmdBuf[24];
 int cmdLen = 0;
@@ -196,6 +207,7 @@ void loadAll() {
   pet.kicks = prefs.getUInt("kicks", 0);
   lightsOff = prefs.getBool("dark", false);
   toy = prefs.getUChar("toy", TOY_BALL) % NUM_TOYS;
+  toyOut = prefs.getBool("toyOut", true);
   axisY = prefs.getUChar("axY", 1);
   signX = prefs.getChar("sgX", -1);
   signY = prefs.getChar("sgY", -1);
@@ -351,7 +363,8 @@ void dropFood() {
   for (int i = 0; i < MAX_FOOD; i++) {
     if (food[i].active) continue;
     Vec2 p = ceilingSpot();
-    bodyInit(food[i], BODY_FOOD, p.x, p.y, 7, 0.35f, 4);
+    bodyInit(food[i], BODY_FOOD, p.x, p.y, 7, 0.3f, 5);
+    food[i].stick = 0.25f;
     if (pet.action == ACT_BEG) {   // begging worked!
       rewardAcc += pet.hunger > 40 ? 1.2f : 0.3f;
       pet.joy = clampf(pet.joy + 5, 0, 100);
@@ -363,14 +376,16 @@ void dropFood() {
 
 void initToy(float x, float y) {
   switch (toy) {
-    case TOY_BLOCK: bodyInit(ball, BODY_BALL, x, y, 12, 0.15f, 5.0f); break;
-    case TOY_BEACH: bodyInit(ball, BODY_BALL, x, y, 20, 0.65f, 0.4f); break;
-    default:        bodyInit(ball, BODY_BALL, x, y, 13, 0.8f, 0.8f); break;
+    case TOY_BLOCK: bodyInit(ball, BODY_BALL, x, y, 12, 0.15f, 5.0f); ball.stick = 0.4f; break;
+    case TOY_BEACH: bodyInit(ball, BODY_BALL, x, y, 20, 0.65f, 0.4f); ball.stick = 0.03f; break;
+    default:        bodyInit(ball, BODY_BALL, x, y, 13, 0.8f, 0.8f); ball.stick = 0.05f; break;
   }
 }
 
 void tossBall() {
   Vec2 p = ceilingSpot();
+  toyOut = true;
+  prefs.putBool("toyOut", true);
   initToy(p.x, p.y);
   ball.vx = frand(-200, 200);
   ball.vy = frand(-200, 200);
@@ -586,33 +601,41 @@ void eatAndPlay() {
       break;
     }
   }
-  // Kicking the ball
-  if (ball.active && !pet.held) {
-    float hit = collide(b, ball, 3.0f, 1.0f);
-    if (hit > 0 && pet.action == ACT_BALL && pet.kickCool <= 0) {
-      Vec2 g = gScreen;
-      float gm = fmaxf(vlen(g), 0.01f);
-      float dx = ball.x - b.x, dy = ball.y - b.y;
-      float d = fmaxf(vlen(v2(dx, dy)), 1);
-      ball.vx += dx / d * 260 - g.x / gm * 220;
-      ball.vy += dy / d * 260 - g.y / gm * 220;
-      pet.kickCool = 0.6f;
-      pet.kicks++;
-      sendEvent("kick", pet.energy);
-      pet.joy = clampf(pet.joy + 6, 0, 100);
-      pet.energy -= 1.5f;
-      rewardAcc += pet.energy > 15 ? 0.6f : -0.2f;
+  // Kicking the toy
+  if (ball.active && !pet.held && pet.action == ACT_BALL && pet.kickCool <= 0 &&
+      vlen(v2(ball.x - b.x, ball.y - b.y)) < b.r + ball.r + 3) {
+    Vec2 g = gScreen;
+    float gm = fmaxf(vlen(g), 0.01f);
+    float dx = ball.x - b.x, dy = ball.y - b.y;
+    float d = fmaxf(vlen(v2(dx, dy)), 1);
+    ball.vx += dx / d * 260 - g.x / gm * 220;
+    ball.vy += dy / d * 260 - g.y / gm * 220;
+    pet.kickCool = 0.6f;
+    pet.kicks++;
+    sendEvent("kick", pet.energy);
+    pet.joy = clampf(pet.joy + 6, 0, 100);
+    pet.energy -= 1.5f;
+    rewardAcc += pet.energy > 15 ? 0.6f : -0.2f;
+  }
+}
+
+// Keep things from overlapping. Runs after every physics step.
+void resolveContacts() {
+  Body &b = pet.body;
+  bool petSolid = !pet.held && !pet.gripping;
+  for (int it = 0; it < 2; it++) {
+    if (ball.active && petSolid) collide(b, ball, 3.0f, 1.0f);
+    if (!pet.held && !pet.asleep) collideBox(b, bed, 3.0f, 4.0f);
+    if (ball.active) collideBox(ball, bed, 1.0f, 4.0f);
+    for (int i = 0; i < MAX_FOOD; i++) {
+      if (!food[i].active) continue;
+      if (petSolid) collide(b, food[i], 3.0f, 0.3f);
+      collideBox(food[i], bed, 0.3f, 4.0f);
+      if (ball.active) collide(ball, food[i], 1.0f, 0.3f);
+      for (int j = i + 1; j < MAX_FOOD; j++)
+        if (food[j].active) collide(food[i], food[j], 0.3f, 0.3f);
     }
   }
-  // Food and bed get pushed around
-  for (int i = 0; i < MAX_FOOD; i++)
-    if (food[i].active) {
-      if (!pet.held) collide(b, food[i], 3.0f, 0.3f);
-      collide(bed, food[i], 2.0f, 0.3f);
-      if (ball.active) collide(ball, food[i], 1.0f, 0.3f);
-    }
-  if (!pet.held && !pet.asleep) collide(b, bed, 3.0f, 2.0f);
-  if (ball.active) collide(ball, bed, 1.0f, 2.0f);
 }
 
 void updateNeeds(float dt) {
@@ -639,11 +662,21 @@ void updateWorld(float dt) {
   updateNeeds(dt);
   petBehave(dt);
 
-  // Physics in two small steps for stability.
-  const int SUB = 2;
-  float h = dt / SUB;
+  // Bed shape follows the floor: wide along it, short away from it.
+  uint8_t fw = floorWall(gScreen);
+  bool sideways = !floating && (fw == WALL_L || fw == WALL_R);
+  bed.hw = sideways ? 25 : 38;
+  bed.hh = sideways ? 38 : 25;
+
+  // Physics in fixed 1/240 s steps: smooth at any frame rate.
+  physAcc += dt;
+  int steps = 0;
   pet.body.impact = 0;
-  for (int s = 0; s < SUB; s++) {
+  ball.impact = 0;
+  while (physAcc >= PHYS_DT && steps < 16) {
+    physAcc -= PHYS_DT;
+    steps++;
+    float h = PHYS_DT;
     if (pet.held) {
       pet.body.x = clampf(fx, ROOM_L + pet.body.r, ROOM_R - pet.body.r);
       pet.body.y = clampf(fy, ROOM_T + pet.body.r, ROOM_B - pet.body.r);
@@ -660,14 +693,15 @@ void updateWorld(float dt) {
         ball.y = clampf(fy, ROOM_T + ball.r, ROOM_B - ball.r);
         ball.vx = fvx; ball.vy = fvy;
       } else {
-        ball.impact = 0;
         stepBody(ball, g, h, floating);
       }
     }
     stepBody(bed, g, h, floating);
     for (int i = 0; i < MAX_FOOD; i++)
       if (food[i].active) stepBody(food[i], g, h, floating);
+    resolveContacts();
   }
+  if (physAcc > PHYS_DT * 4) physAcc = 0;   // don't spiral after a long pause
   eatAndPlay();
 
   // Asleep in bed: settle onto the mattress.
@@ -831,6 +865,37 @@ void drawBloop() {
   }
 }
 
+// ---- Text helpers (proportional fonts) ----
+const GFXfont *const F_SMALL = &FreeSans9pt7b;
+const GFXfont *const F_BOLD = &FreeSansBold9pt7b;
+const GFXfont *const F_TITLE = &FreeSansBold12pt7b;
+
+void useFont(const GFXfont *f) {
+  cv->setFont(f);
+  cv->setTextSize(1);
+}
+void plainFont() { cv->setFont((const GFXfont *)NULL); }
+
+int textWidth(const GFXfont *f, const char *str) {
+  int16_t x1, y1;
+  uint16_t w, h;
+  useFont(f);
+  cv->getTextBounds(str, 0, 0, &x1, &y1, &w, &h);
+  plainFont();
+  return w;
+}
+// y is the text baseline.
+void textAt(const GFXfont *f, int x, int y, const char *str, uint16_t color) {
+  useFont(f);
+  cv->setTextColor(color);
+  cv->setCursor(x, y);
+  cv->print(str);
+  plainFont();
+}
+void textCentered(const GFXfont *f, int cx, int y, const char *str, uint16_t color) {
+  textAt(f, cx - textWidth(f, str) / 2, y, str, color);
+}
+
 // Four-cornered shape (two triangles), for things that turn with gravity.
 void fillQuad(Vec2 a, Vec2 b, Vec2 c, Vec2 d, uint16_t col) {
   cv->fillTriangle(a.x, a.y, b.x, b.y, c.x, c.y, col);
@@ -904,6 +969,65 @@ void drawToy() {
   }
 }
 
+// Word-wrapped bubble with a little tail pointing at Bloop.
+void drawBubble(const char *txt) {
+  const int maxW = 180, lineH = 18, padX = 10, padY = 7;
+  char lines[3][40];
+  int n = 0, widest = 0;
+  char word[40];
+  lines[0][0] = 0;
+  const char *p = txt;
+  while (*p && n < 3) {
+    int wl = 0;
+    while (*p == ' ') p++;
+    while (*p && *p != ' ' && wl < 38) word[wl++] = *p++;
+    word[wl] = 0;
+    if (!wl) break;
+    char trial[80];
+    snprintf(trial, sizeof(trial), "%s%s%s", lines[n], lines[n][0] ? " " : "", word);
+    if (textWidth(F_SMALL, trial) > maxW && lines[n][0]) {
+      if (++n >= 3) break;
+      snprintf(lines[n], sizeof(lines[n]), "%s", word);
+    } else {
+      snprintf(lines[n], sizeof(lines[n]), "%s", trial);
+    }
+  }
+  int count = (n < 3) ? n + 1 : 3;
+  for (int i = 0; i < count; i++) widest = max(widest, textWidth(F_SMALL, lines[i]));
+  int w = widest + padX * 2, h = count * lineH + padY * 2 - 4;
+
+  // Above Bloop if there's room, otherwise below.
+  float px = pet.body.x, top = pet.body.y - pet.body.r - 30;
+  bool above = top - h > ROOM_T + 4;
+  int bx = (int)clampf(px - w / 2, ROOM_L + 4, ROOM_R - w - 4);
+  int by = above ? (int)(top - h) : (int)clampf(pet.body.y + pet.body.r + 16, ROOM_T + 4, ROOM_B - h - 4);
+  uint16_t fill = RGB565_WHITE, edge = rgb(40, 36, 60);
+  int tx = (int)clampf(px, bx + 12, bx + w - 12);
+  if (above) cv->fillTriangle(tx - 7, by + h - 2, tx + 7, by + h - 2, (int)px, by + h + 10, fill);
+  else cv->fillTriangle(tx - 7, by + 2, tx + 7, by + 2, (int)px, by - 10, fill);
+  cv->fillRoundRect(bx, by, w, h, 10, fill);
+  cv->drawRoundRect(bx, by, w, h, 10, edge);
+  for (int i = 0; i < count; i++) textAt(F_SMALL, bx + padX, by + padY + 12 + i * lineH, lines[i], rgb(30, 28, 40));
+}
+
+// Soft shadow on the floor under Bloop.
+void drawShadow() {
+  if (floating || pet.held) return;
+  uint8_t fw = floorWall(gScreen);
+  float x = pet.body.x, y = pet.body.y, gap;
+  switch (fw) {
+    case WALL_B: gap = ROOM_B - (y + pet.body.r); y = ROOM_B - 3; break;
+    case WALL_T: gap = (y - pet.body.r) - ROOM_T; y = ROOM_T + 3; break;
+    case WALL_L: gap = (x - pet.body.r) - ROOM_L; x = ROOM_L + 3; break;
+    default:     gap = ROOM_R - (x + pet.body.r); x = ROOM_R - 3; break;
+  }
+  if (gap > 140) return;
+  int len = (int)(pet.body.r * (1.0f - gap / 200.0f)), thick = 3;
+  uint16_t c = lightsOff ? rgb(14, 12, 26) : rgb(36, 30, 60);
+  if (fw == WALL_B || fw == WALL_T) cv->fillEllipse(x, y, len, thick, c);
+  else cv->fillEllipse(x, y, thick, len, c);
+}
+
 void drawRoom() {
   // Wallpaper (dimmer with the lights off)
   uint16_t wall = lightsOff ? rgb(26, 22, 44) : rgb(58, 50, 92);
@@ -958,6 +1082,7 @@ void drawRoom() {
 
   drawToy();
 
+  drawShadow();
   drawBloop();
   if (pet.asleep && nearBed(12)) drawBlanketOverBloop();
 
@@ -995,57 +1120,70 @@ void drawRoom() {
     }
   }
 
-  // Thought bubble
-  if (pet.bubbleT > 0 && !pet.asleep) {
-    char txt[16];
-    snprintf(txt, sizeof(txt), "%s%s", ACTION_THOUGHTS[pet.action], brain.lastWasExplore ? "?" : "");
-    int w = strlen(txt) * 6 + 12;
-    int bx = (int)clampf(pet.body.x - w / 2, ROOM_L + 2, ROOM_R - w - 2);
-    int by = (int)clampf(pet.body.y - pet.body.r - 42, ROOM_T + 2, ROOM_B - 20);
-    if (by > pet.body.y - pet.body.r - 20) by = (int)clampf(pet.body.y + pet.body.r + 12, ROOM_T + 2, ROOM_B - 20);
-    cv->fillRoundRect(bx, by, w, 18, 8, RGB565_WHITE);
-    cv->setTextSize(1);
-    cv->setTextColor(RGB565_BLACK);
-    cv->setCursor(bx + 6, by + 5);
-    cv->print(txt);
+  // Speech / thought bubble
+  if (!pet.asleep && (sayT > 0 || pet.bubbleT > 0)) {
+    char txt[64];
+    if (sayT > 0) snprintf(txt, sizeof(txt), "%s", sayText);
+    else snprintf(txt, sizeof(txt), "%s%s", ACTION_THOUGHTS[pet.action], brain.lastWasExplore ? "?" : "");
+    drawBubble(txt);
   }
 
-  if (floating) {
-    cv->setTextSize(2);
-    cv->setTextColor(rgb(180, 220, 255));
-    cv->setCursor(118, ROOM_T + 10);
-    cv->print("ZERO-G");
-  }
+  if (floating) textCentered(F_BOLD, SCREEN_W / 2, ROOM_T + 24, "ZERO-G", rgb(180, 220, 255));
 }
 
-void drawBar(int x, int y, const char *label, float v, uint16_t color) {
-  cv->setTextSize(1);
-  cv->setTextColor(RGB565_LIGHTGREY);
-  cv->setCursor(x, y);
-  cv->print(label);
-  cv->fillRect(x + 8, y, 40, 7, rgb(50, 50, 60));
-  cv->fillRect(x + 8, y, (int)(40 * clampf(v, 0, 100) / 100), 7, color);
+// Little icons for the status bars.
+void iconFood(int x, int y) { cv->fillCircle(x, y, 4, rgb(230, 150, 50)); cv->fillCircle(x - 1, y - 1, 1, rgb(255, 220, 140)); }
+void iconEnergy(int x, int y) {
+  uint16_t c = rgb(250, 210, 70);
+  cv->fillTriangle(x + 1, y - 5, x - 3, y + 1, x + 1, y + 1, c);
+  cv->fillTriangle(x - 1, y + 5, x + 3, y - 1, x - 1, y - 1, c);
+}
+void iconJoy(int x, int y) {
+  uint16_t c = rgb(255, 110, 160);
+  cv->fillCircle(x - 2, y - 1, 2, c); cv->fillCircle(x + 2, y - 1, 2, c);
+  cv->fillTriangle(x - 4, y, x + 4, y, x, y + 4, c);
+}
+void iconHealth(int x, int y) { uint16_t c = rgb(110, 220, 120); cv->fillRect(x - 1, y - 4, 3, 9, c); cv->fillRect(x - 4, y - 1, 9, 3, c); }
+
+void drawMeter(int x, int y, int which, float v) {
+  switch (which) {
+    case 0: iconFood(x + 4, y + 3); break;
+    case 1: iconEnergy(x + 4, y + 3); break;
+    case 2: iconJoy(x + 4, y + 3); break;
+    default: iconHealth(x + 4, y + 3); break;
+  }
+  const uint16_t cols[4] = {rgb(230, 150, 50), rgb(250, 210, 70), rgb(255, 110, 160), rgb(110, 220, 120)};
+  v = clampf(v, 0, 100);
+  cv->fillRoundRect(x + 12, y, 44, 7, 3, rgb(48, 46, 62));
+  int w = (int)(44 * v / 100);
+  if (w > 2) cv->fillRoundRect(x + 12, y, w, 7, 3, v < 20 ? rgb(235, 80, 80) : cols[which]);
 }
 
 void drawHud() {
   cv->fillRect(0, 0, SCREEN_W, HUD_H, rgb(22, 20, 34));
-  cv->setTextSize(2);
-  cv->setTextColor(rgb(120, 220, 190));
-  cv->setCursor(8, 6);
-  cv->print("Bloop");
+  cv->drawFastHLine(0, HUD_H - 1, SCREEN_W, rgb(48, 44, 70));
+  // Bloop's face as an avatar
+  cv->fillCircle(22, 23, 15, bodyColor());
+  cv->fillCircle(17, 20, 3, RGB565_WHITE); cv->fillCircle(27, 20, 3, RGB565_WHITE);
+  cv->fillCircle(17, 20, 1, RGB565_BLACK); cv->fillCircle(27, 20, 1, RGB565_BLACK);
+  cv->fillArc(22, 25, 5, 4, 20, 160, RGB565_BLACK);
+  textAt(F_BOLD, 44, 20, "Bloop", rgb(140, 230, 200));
+  char sub[40];
+  snprintf(sub, sizeof(sub), "Lv %lu  %s", (unsigned long)(brain.decisions / 40 + 1), pet.asleep ? "asleep" : ACTION_NAMES[pet.action]);
   cv->setTextSize(1);
-  cv->setTextColor(RGB565_LIGHTGREY);
-  cv->setCursor(8, 28);
-  cv->printf("Lv %lu  %s", (unsigned long)(brain.decisions / 40 + 1), ACTION_NAMES[pet.action]);
+  cv->setTextColor(rgb(170, 168, 190));
+  cv->setCursor(44, 30);
+  cv->print(sub);
 
-  drawBar(150, 8, "F", 100 - pet.hunger, rgb(230, 150, 50));
-  drawBar(150, 26, "E", pet.energy, rgb(120, 170, 240));
-  drawBar(212, 8, "J", pet.joy, rgb(255, 110, 160));
-  drawBar(212, 26, "H", pet.health, rgb(110, 220, 120));
+  drawMeter(152, 10, 0, 100 - pet.hunger);
+  drawMeter(152, 28, 1, pet.energy);
+  drawMeter(214, 10, 2, pet.joy);
+  drawMeter(214, 28, 3, pet.health);
 
-  // Gravity arrow
-  int cx = 296, cy = 23;
-  cv->drawCircle(cx, cy, 16, rgb(90, 90, 110));
+  // Which way is down
+  int cx = 297, cy = 23;
+  cv->fillCircle(cx, cy, 15, rgb(34, 32, 50));
+  cv->drawCircle(cx, cy, 15, rgb(70, 66, 96));
   if (floating) {
     cv->setTextColor(rgb(180, 220, 255));
     cv->setCursor(cx - 5, cy - 3);
@@ -1053,26 +1191,53 @@ void drawHud() {
   } else {
     float m = fmaxf(vlen(gScreen), 0.01f);
     float ux = gScreen.x / m, uy = gScreen.y / m;
-    int tx = cx + ux * 13, ty = cy + uy * 13;
-    cv->drawLine(cx - ux * 10, cy - uy * 10, tx, ty, RGB565_WHITE);
+    int tx = cx + ux * 12, ty = cy + uy * 12;
+    cv->drawLine(cx - ux * 9, cy - uy * 9, tx, ty, RGB565_WHITE);
     cv->fillTriangle(tx, ty, tx - ux * 6 - uy * 4, ty - uy * 6 + ux * 4, tx - ux * 6 + uy * 4, ty - uy * 6 - ux * 4, RGB565_WHITE);
   }
 }
 
-const char *const TOOL_LABELS[5] = {"FEED", "TOY", "GOOD", "NO", "MORE"};
+const char *const TOOL_LABELS[5] = {"Feed", "Toy", "Good", "No", "More"};
+
+void drawToolIcon(int i, int cx, int cy, uint16_t c) {
+  switch (i) {
+    case 0:  // bowl with food
+      cv->fillCircle(cx - 4, cy - 2, 3, c); cv->fillCircle(cx + 2, cy - 3, 3, c); cv->fillCircle(cx + 6, cy - 1, 2, c);
+      cv->fillArc(cx, cy, 10, 0, 0, 180, c);
+      break;
+    case 1:  // ball
+      cv->drawCircle(cx, cy, 9, c); cv->drawCircle(cx, cy, 8, c);
+      cv->drawLine(cx - 8, cy, cx + 8, cy, c);
+      cv->drawFastVLine(cx, cy - 8, 17, c);
+      break;
+    case 2:  // heart
+      cv->fillCircle(cx - 4, cy - 2, 5, c); cv->fillCircle(cx + 4, cy - 2, 5, c);
+      cv->fillTriangle(cx - 9, cy, cx + 9, cy, cx, cy + 9, c);
+      break;
+    case 3:  // X
+      for (int d = -1; d <= 1; d++) {
+        cv->drawLine(cx - 7 + d, cy - 7, cx + 7 + d, cy + 7, c);
+        cv->drawLine(cx - 7 + d, cy + 7, cx + 7 + d, cy - 7, c);
+      }
+      break;
+    default:  // three dots
+      cv->fillCircle(cx - 8, cy, 3, c); cv->fillCircle(cx, cy, 3, c); cv->fillCircle(cx + 8, cy, 3, c);
+      break;
+  }
+}
 
 void drawToolbar() {
   cv->fillRect(0, TOOLBAR_Y, SCREEN_W, SCREEN_H - TOOLBAR_Y, rgb(22, 20, 34));
-  const uint16_t cols[5] = {rgb(200, 120, 40), rgb(200, 60, 70), rgb(50, 150, 80), rgb(150, 50, 50), rgb(80, 80, 160)};
+  cv->drawFastHLine(0, TOOLBAR_Y, SCREEN_W, rgb(48, 44, 70));
+  const uint16_t cols[5] = {rgb(214, 128, 52), rgb(206, 72, 84), rgb(58, 160, 98), rgb(160, 64, 70), rgb(92, 92, 176)};
+  bool flash = toolFlash >= 0 && millis() - toolFlashMs < 140;
   for (int i = 0; i < 5; i++) {
-    int x = i * 64 + 3;
-    bool on = (i == 4 && screen != SCR_ROOM);
-    cv->fillRoundRect(x, TOOLBAR_Y + 8, 58, 40, 8, on ? RGB565_WHITE : cols[i]);
-    cv->setTextSize(2);
-    cv->setTextColor(on ? cols[i] : RGB565_WHITE);
-    int tw = strlen(TOOL_LABELS[i]) * 12;
-    cv->setCursor(x + 29 - tw / 2, TOOLBAR_Y + 21);
-    cv->print(TOOL_LABELS[i]);
+    int x = i * 64 + 4;
+    bool on = (i == 4 && screen != SCR_ROOM) || (flash && i == toolFlash);
+    uint16_t bg = on ? RGB565_WHITE : cols[i], fg = on ? cols[i] : RGB565_WHITE;
+    cv->fillRoundRect(x, TOOLBAR_Y + 6, 56, 46, 12, bg);
+    drawToolIcon(i, x + 28, TOOLBAR_Y + 21, fg);
+    textCentered(F_SMALL, x + 28, TOOLBAR_Y + 46, TOOL_LABELS[i], fg);
   }
 }
 
@@ -1103,26 +1268,23 @@ void drawHabit(int y, const char *when, Action a, float score) {
 
 void drawBrain() {
   cv->fillRect(0, HUD_H, SCREEN_W, TOOLBAR_Y - HUD_H, rgb(16, 14, 26));
-  cv->setTextSize(2);
-  cv->setTextColor(rgb(150, 160, 255));
-  cv->setCursor(10, HUD_H + 8);
-  cv->print("BLOOP'S BRAIN");
+  textAt(F_TITLE, 10, HUD_H + 26, "Bloop's brain", rgb(170, 176, 255));
 
   cv->setTextSize(1);
   cv->setTextColor(RGB565_LIGHTGREY);
-  cv->setCursor(10, HUD_H + 30);
+  cv->setCursor(10, HUD_H + 34);
   cv->printf("Choices learned from: %lu   Exploring: %d%%", (unsigned long)brain.decisions, (int)(brain.epsilon() * 100));
-  cv->setCursor(10, HUD_H + 42);
+  cv->setCursor(10, HUD_H + 46);
   cv->printf("Age %dm  Falls %lu  Snacks %lu  Kicks %lu", (int)(pet.age / 60), (unsigned long)pet.falls,
              (unsigned long)pet.treats, (unsigned long)pet.kicks);
 
   char buf[96];
   describeState(decodeState(curState), buf, sizeof(buf));
   cv->setTextColor(RGB565_WHITE);
-  cv->setCursor(10, HUD_H + 60);
+  cv->setCursor(10, HUD_H + 62);
   cv->print("Right now: ");
   cv->setTextColor(rgb(255, 210, 120));
-  cv->setCursor(10, HUD_H + 72);
+  cv->setCursor(10, HUD_H + 74);
   cv->print(buf);
 
   // How much Bloop expects each action to pay off right now
@@ -1174,10 +1336,7 @@ void drawBrain() {
 // ---- Tilt calibration ----
 void drawCal() {
   cv->fillScreen(rgb(16, 14, 26));
-  cv->setTextSize(2);
-  cv->setTextColor(rgb(150, 160, 255));
-  cv->setCursor(10, 20);
-  cv->print("TILT SETUP");
+  textAt(F_TITLE, 10, 36, "Tilt setup", rgb(170, 176, 255));
   cv->setTextColor(RGB565_WHITE);
   cv->setCursor(10, 60);
   if (!imuOk) {
@@ -1239,49 +1398,40 @@ void calTap(int x, int y) {
 // ============================================================ touch
 
 // ---- MORE menu ----
-const int MENU_X[2] = {12, 166}, MENU_Y0 = HUD_H + 70, MENU_BW = 142, MENU_BH = 70, MENU_GAP = 14;
+const int MENU_X[2] = {10, 164}, MENU_Y0 = HUD_H + 50, MENU_BW = 146, MENU_BH = 74, MENU_GAP = 8;
+const int MENU_ROWS = 4;
 
 void menuButton(int col, int row, const char *title, const char *value, uint16_t color) {
   int x = MENU_X[col], y = MENU_Y0 + row * (MENU_BH + MENU_GAP);
-  cv->fillRoundRect(x, y, MENU_BW, MENU_BH, 10, color);
-  cv->setTextSize(2);
-  cv->setTextColor(RGB565_WHITE);
-  cv->setCursor(x + 10, y + 14);
-  cv->print(title);
+  cv->fillRoundRect(x, y, MENU_BW, MENU_BH, 12, color);
+  textAt(F_BOLD, x + 12, y + 28, title, RGB565_WHITE);
   cv->setTextSize(1);
-  cv->setTextColor(rgb(230, 230, 240));
-  cv->setCursor(x + 10, y + 44);
+  cv->setTextColor(rgb(235, 235, 245));
+  cv->setCursor(x + 12, y + 50);
   cv->print(value);
 }
 
 void drawMenu() {
   cv->fillRect(0, HUD_H, SCREEN_W, TOOLBAR_Y - HUD_H, rgb(16, 14, 26));
-  cv->setTextSize(2);
-  cv->setTextColor(rgb(150, 160, 255));
-  cv->setCursor(12, HUD_H + 14);
-  cv->print("MORE");
-  cv->setTextSize(1);
-  cv->setTextColor(RGB565_LIGHTGREY);
-  cv->setCursor(12, HUD_H + 40);
-  cv->print("Tap MORE again to go back to the room.");
+  textAt(F_TITLE, 12, HUD_H + 32, "More", rgb(170, 176, 255));
   char buf[32];
-  menuButton(0, 0, "BRAIN", "what Bloop has learned", rgb(80, 80, 160));
-  menuButton(1, 0, "LIGHTS", lightsOff ? "off: Bloop gets sleepy" : "on", lightsOff ? rgb(40, 40, 70) : rgb(190, 150, 40));
+  menuButton(0, 0, "Brain", "what Bloop has learned", rgb(84, 84, 168));
+  menuButton(1, 0, "Lights", lightsOff ? "off: Bloop gets sleepy" : "on", lightsOff ? rgb(44, 44, 76) : rgb(196, 152, 44));
   snprintf(buf, sizeof(buf), "now: %s", TOY_NAMES[toy]);
-  menuButton(0, 1, "TOY", buf, rgb(200, 60, 70));
-  menuButton(1, 1, "CLEAN UP", "remove all snacks", rgb(70, 120, 90));
-  menuButton(0, 2, "TILT SETUP", "which way is down", rgb(50, 70, 120));
-  snprintf(buf, sizeof(buf), "%s", pet.asleep ? "Bloop is asleep" : "send Bloop to bed");
-  menuButton(1, 2, "BEDTIME", buf, rgb(90, 70, 140));
+  menuButton(0, 1, "Toy", buf, rgb(206, 72, 84));
+  menuButton(1, 1, toyOut ? "Put toy away" : "Bring toy", toyOut ? "take it out of the room" : "back into the room", rgb(150, 80, 120));
+  menuButton(0, 2, "Clean up", "remove all snacks", rgb(64, 128, 92));
+  menuButton(1, 2, "Bedtime", pet.asleep ? "Bloop is asleep" : "send Bloop to bed", rgb(96, 72, 150));
+  menuButton(0, 3, "Tilt setup", "which way is down", rgb(52, 76, 128));
+  menuButton(1, 3, "Back", "to the room", rgb(70, 68, 90));
 }
 
 void menuTap(int x, int y) {
   int col = x < 160 ? 0 : 1;
+  if (y < MENU_Y0) return;
   int row = (y - MENU_Y0) / (MENU_BH + MENU_GAP);
-  if (y < MENU_Y0 || row > 2) return;
-  if ((y - MENU_Y0) % (MENU_BH + MENU_GAP) > MENU_BH) return;
-  int id = row * 2 + col;
-  switch (id) {
+  if (row >= MENU_ROWS || (y - MENU_Y0) % (MENU_BH + MENU_GAP) > MENU_BH) return;
+  switch (row * 2 + col) {
     case 0: screen = SCR_BRAIN; break;
     case 1: lightsOff = !lightsOff; prefs.putBool("dark", lightsOff); sendEvent(lightsOff ? "lights_off" : "lights_on", 0); break;
     case 2: {
@@ -1289,22 +1439,36 @@ void menuTap(int x, int y) {
       prefs.putUChar("toy", toy);
       float bx = ball.active ? ball.x : SCREEN_W / 2, by = ball.active ? ball.y : (ROOM_T + ROOM_B) / 2;
       initToy(bx, by);
+      ball.active = toyOut;
       break;
     }
     case 3:
+      if (toyOut) {
+        toyOut = false;
+        ball.active = false;
+        if (grabCand == GRAB_BALL) grabCand = GRAB_NONE;
+        prefs.putBool("toyOut", false);
+      } else {
+        tossBall();
+      }
+      break;
+    case 4:
       for (int i = 0; i < MAX_FOOD; i++) food[i].active = false;
       break;
-    case 4: calStep = 0; calMsg = ""; screen = SCR_CAL; break;
     case 5:
       startAction(ACT_SLEEP);
       sinceDecide = 0;
       screen = SCR_ROOM;
       break;
+    case 6: calStep = 0; calMsg = ""; screen = SCR_CAL; break;
+    case 7: screen = SCR_ROOM; break;
   }
 }
 
 void toolbarTap(int i) {
   confirmReset = false;
+  toolFlash = i;
+  toolFlashMs = millis();
   switch (i) {
     case 0: dropFood(); break;
     case 1: tossBall(); break;
@@ -1478,8 +1642,10 @@ void setup() {
   if (!prefs.getBool("cal", false)) screen = SCR_CAL;
 
   bodyInit(pet.body, BODY_PET, SCREEN_W / 2, ROOM_B - 40, 22, 0.22f, 7);
-  bodyInit(bed, BODY_BED, ROOM_R - 50, ROOM_B - 30, 26, 0.1f, 6);
+  bodyInit(bed, BODY_BED, ROOM_R - 50, ROOM_B - 30, 26, 0.05f, 8);
+  bed.isBox = true; bed.hw = 38; bed.hh = 25; bed.stick = 0.35f;
   initToy(ROOM_L + 60, ROOM_B - 30);
+  ball.active = toyOut;
   for (int i = 0; i < MAX_FOOD; i++) food[i].active = false;
   for (int i = 0; i < MAX_PARTICLES; i++) parts[i].active = false;
   pet.action = ACT_SIT;

@@ -634,7 +634,11 @@ function drawBrainDiagram() {
     const len = t * bw / 2;
     if (Math.abs(v) >= 0.01) el("rect", { x: v >= 0 ? mid : mid - len, y: y + 8, width: Math.max(len, 1), height: 10, rx: 2, fill: v >= 0 ? pos : neg }, svg);
     svgText(svg, ax + aw - 10, y + 18, (v >= 0 ? "+" : "") + v.toFixed(2), { "text-anchor": "end", "font-size": 12, fill: ink2, "font-variant-numeric": "tabular-nums" });
-    if (isChosen) svgText(svg, ax - 8, y + 18, last.x ? "random try ▸" : "chosen ▸", { "text-anchor": "end", "font-size": 11, "font-weight": 650 });
+    if (isChosen) {
+      const lab = last.x ? "random try" : "chosen";
+      el("rect", { x: ax - 78, y: y + 3, width: 72, height: 20, rx: 10, fill: ink }, svg);
+      svgText(svg, ax - 42, y + 17, lab, { "text-anchor": "middle", "font-size": 11, "font-weight": 650, fill: surface });
+    }
   });
 }
 
@@ -650,7 +654,7 @@ function drawLoopDiagram() {
     ["1  Sense", ["hungry? tired? room tilting?", "toy, food, you nearby?"]],
     ["2  Choose", ["best action in this row,", eps === null ? "or a random one sometimes" : "or random " + eps + "% of the time"]],
     ["3  Act", ["walk, eat, sleep, grip,", "dance, hide…"]],
-    ["4  Reward", ["+ food when hungry, sleep, GOOD", "− falls, shaking, NO, hunger"]],
+    ["4  Reward", ["+ food when hungry, naps, GOOD", "− falls, shakes, NO, hunger"]],
     ["5  Learn", ["Q ← Q + 0.25 × (reward +", "0.8 × best next − Q)"]],
   ];
   const bw = 172, gap = 20, x0 = 12, y = 30, bh = 100;

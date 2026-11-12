@@ -24,6 +24,7 @@ const float STEEP = 0.55f;            // slope (sideways share of gravity) Bloop
 struct Vec2 {
   float x, y;
 };
+inline float clampf_w(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 inline Vec2 v2(float x, float y) { Vec2 v = {x, y}; return v; }
 inline float vlen(Vec2 v) { return sqrtf(v.x * v.x + v.y * v.y); }
 
@@ -41,6 +42,9 @@ struct Body {
   uint8_t touching;  // WALL_* bits this frame
   float impact;      // hardest wall hit this frame (px/s)
   float airTime;     // seconds without touching anything
+  float stick;       // static friction: resists sliding on gentle slopes
+  bool isBox;        // the bed is a box, everything else is round
+  float hw, hh;      // box half-width / half-height
 };
 
 inline void bodyInit(Body &b, BodyKind k, float x, float y, float r, float bounce, float friction) {
@@ -48,6 +52,7 @@ inline void bodyInit(Body &b, BodyKind k, float x, float y, float r, float bounc
   b.x = x; b.y = y; b.vx = 0; b.vy = 0; b.r = r;
   b.bounce = bounce; b.friction = friction;
   b.touching = 0; b.impact = 0; b.airTime = 0;
+  b.stick = 0.12f; b.isBox = false; b.hw = r; b.hh = r;
 }
 
 // Inward-pointing normal of each wall.
@@ -66,10 +71,29 @@ inline uint8_t floorWall(Vec2 g) {
   return g.y > 0 ? WALL_B : WALL_T;
 }
 
+// Physics runs in small fixed steps so it behaves the same at any frame rate.
+const float PHYS_DT = 1.0f / 240.0f;
+
 // Move one body for dt seconds under gravity g (px/s^2) and bounce it off walls.
 inline void stepBody(Body &b, Vec2 g, float dt, bool floating) {
-  b.vx += g.x * dt;
-  b.vy += g.y * dt;
+  float ex = b.isBox ? b.hw : b.r, ey = b.isBox ? b.hh : b.r;
+
+  // Static friction: something resting on a wall stays put on a gentle slope
+  // (and ignores tiny sensor wobble) instead of creeping and jittering.
+  Vec2 ga = g;
+  if (!floating && b.touching) {
+    if (b.touching & (WALL_B | WALL_T)) {
+      float gn = (b.touching & WALL_B) ? g.y : -g.y;
+      if (gn > 0 && fabsf(g.x) < b.stick * gn && fabsf(b.vx) < 20) { ga.x = 0; b.vx *= 0.6f; }
+    }
+    if (b.touching & (WALL_L | WALL_R)) {
+      float gn = (b.touching & WALL_R) ? g.x : -g.x;
+      if (gn > 0 && fabsf(g.y) < b.stick * gn && fabsf(b.vy) < 20) { ga.y = 0; b.vy *= 0.6f; }
+    }
+  }
+
+  b.vx += ga.x * dt;
+  b.vy += ga.y * dt;
   float drag = 1.0f - (floating ? FLOAT_DRAG : AIR_DRAG) * dt;
   b.vx *= drag;
   b.vy *= drag;
@@ -77,24 +101,24 @@ inline void stepBody(Body &b, Vec2 g, float dt, bool floating) {
   b.y += b.vy * dt;
 
   b.touching = 0;
-  float slack = 1.5f;  // treat "resting against" as touching
-  if (b.x - b.r <= ROOM_L + slack) {
-    if (b.x - b.r < ROOM_L) b.x = ROOM_L + b.r;
+  float slack = 1.0f;  // treat "resting against" as touching
+  if (b.x - ex <= ROOM_L + slack) {
+    if (b.x - ex < ROOM_L) b.x = ROOM_L + ex;
     if (b.vx < 0) { b.impact = fmaxf(b.impact, -b.vx); b.vx = -b.vx * b.bounce; }
     b.touching |= WALL_L;
   }
-  if (b.x + b.r >= ROOM_R - slack) {
-    if (b.x + b.r > ROOM_R) b.x = ROOM_R - b.r;
+  if (b.x + ex >= ROOM_R - slack) {
+    if (b.x + ex > ROOM_R) b.x = ROOM_R - ex;
     if (b.vx > 0) { b.impact = fmaxf(b.impact, b.vx); b.vx = -b.vx * b.bounce; }
     b.touching |= WALL_R;
   }
-  if (b.y - b.r <= ROOM_T + slack) {
-    if (b.y - b.r < ROOM_T) b.y = ROOM_T + b.r;
+  if (b.y - ey <= ROOM_T + slack) {
+    if (b.y - ey < ROOM_T) b.y = ROOM_T + ey;
     if (b.vy < 0) { b.impact = fmaxf(b.impact, -b.vy); b.vy = -b.vy * b.bounce; }
     b.touching |= WALL_T;
   }
-  if (b.y + b.r >= ROOM_B - slack) {
-    if (b.y + b.r > ROOM_B) b.y = ROOM_B - b.r;
+  if (b.y + ey >= ROOM_B - slack) {
+    if (b.y + ey > ROOM_B) b.y = ROOM_B - ey;
     if (b.vy > 0) { b.impact = fmaxf(b.impact, b.vy); b.vy = -b.vy * b.bounce; }
     b.touching |= WALL_B;
   }
@@ -105,9 +129,9 @@ inline void stepBody(Body &b, Vec2 g, float dt, bool floating) {
   if (b.touching & (WALL_T | WALL_B)) b.vx *= f;
   if (b.touching & (WALL_L | WALL_R)) b.vy *= f;
 
-  // Tiny bounces just jitter; stop them.
-  if ((b.touching & (WALL_T | WALL_B)) && fabsf(b.vy) < 25) b.vy = 0;
-  if ((b.touching & (WALL_L | WALL_R)) && fabsf(b.vx) < 25) b.vx = 0;
+  // Tiny bounces just jitter; settle them.
+  if ((b.touching & (WALL_T | WALL_B)) && fabsf(b.vy) < 30) b.vy = 0;
+  if ((b.touching & (WALL_L | WALL_R)) && fabsf(b.vx) < 30) b.vx = 0;
 
   b.airTime = b.touching ? 0 : b.airTime + dt;
 }
@@ -131,6 +155,38 @@ inline float collide(Body &a, Body &b, float massA, float massB) {
   float j = -(1 + e) * rel / (1 / massA + 1 / massB);
   a.vx -= j * nx / massA; a.vy -= j * ny / massA;
   b.vx += j * nx / massB; b.vy += j * ny / massB;
+  return -rel;
+}
+
+// Push a round body out of a box (the bed). Returns the closing speed if they hit.
+inline float collideBox(Body &c, Body &box, float massC, float massB) {
+  float px = clampf_w(c.x, box.x - box.hw, box.x + box.hw);
+  float py = clampf_w(c.y, box.y - box.hh, box.y + box.hh);
+  float dx = c.x - px, dy = c.y - py;
+  float d2 = dx * dx + dy * dy;
+  float nx, ny, overlap;
+  if (d2 > 0.0001f) {
+    float d = sqrtf(d2);
+    if (d >= c.r) return 0;
+    nx = dx / d; ny = dy / d;
+    overlap = c.r - d;
+  } else {
+    // Centre is inside the box: push out the shortest way.
+    float ox = box.hw + c.r - fabsf(c.x - box.x), oy = box.hh + c.r - fabsf(c.y - box.y);
+    if (ox < oy) { nx = c.x > box.x ? 1 : -1; ny = 0; overlap = ox; }
+    else { nx = 0; ny = c.y > box.y ? 1 : -1; overlap = oy; }
+  }
+  float total = massC + massB;
+  c.x += nx * overlap * (massB / total);
+  c.y += ny * overlap * (massB / total);
+  box.x -= nx * overlap * (massC / total);
+  box.y -= ny * overlap * (massC / total);
+  float rel = (c.vx - box.vx) * nx + (c.vy - box.vy) * ny;
+  if (rel >= 0) return 0;
+  float e = fminf(c.bounce, box.bounce) + 0.1f;
+  float j = -(1 + e) * rel / (1 / massC + 1 / massB);
+  c.vx += j * nx / massC; c.vy += j * ny / massC;
+  box.vx -= j * nx / massB; box.vy -= j * ny / massB;
   return -rel;
 }
 
