@@ -79,6 +79,7 @@ class Brain {
 public:
   float q[NUM_STATES][NUM_ACTIONS];
   uint32_t decisions = 0;   // how many choices it has learned from
+  uint32_t dreams = 0;      // lessons learned in dreams (see dream.h)
   int lastState = -1;
   Action lastAction = ACT_SIT;
   bool lastWasExplore = false;
@@ -92,13 +93,23 @@ public:
     for (int s = 0; s < NUM_STATES; s++)
       for (int a = 0; a < NUM_ACTIONS; a++) q[s][a] = 0;
     decisions = 0;
+    dreams = 0;
     lastState = -1;
   }
 
   // Exploration: lots of random tries as a baby, fewer as it grows up.
   float epsilon() const {
-    float e = 0.40f * expf(-(float)decisions / 500.0f);
+    // Dreams count too (a lot of dreaming is worth a bit of real life).
+    float e = 0.40f * expf(-((float)decisions + dreams / 100.0f) / 500.0f);
     return e < 0.06f ? 0.06f : e;
+  }
+
+  // Learn from one lesson (s, a) -> reward r, next situation s2.
+  void learn(int s, int a, float r, int s2, float alpha) {
+    float &old = q[s][a];
+    old += alpha * (r + GAMMA * maxQ(s2) - old);
+    if (old > 20) old = 20;
+    if (old < -20) old = -20;
   }
 
   Action best(int s) const {
@@ -164,6 +175,7 @@ public:
   void save(Preferences &p) {
     p.putBytes("q", q, sizeof(q));
     p.putUInt("dec", decisions);
+    p.putUInt("dreams", dreams);
   }
 
   bool load(Preferences &p) {
@@ -173,6 +185,7 @@ public:
     }
     p.getBytes("q", q, sizeof(q));
     decisions = p.getUInt("dec", 0);
+    dreams = p.getUInt("dreams", 0);
     return true;
   }
 };

@@ -18,6 +18,7 @@
 #include <Preferences.h>
 #include "world.h"
 #include "brain.h"
+#include "dream.h"
 #include "FreeSans9pt7b.h"
 #include "FreeSansBold9pt7b.h"
 #include "FreeSansBold12pt7b.h"
@@ -314,11 +315,11 @@ void sendDecision(float reward) {
   Senses s = decodeState(curState);
   Serial.printf("{\"t\":\"d\",\"n\":%lu,\"s\":%d,\"a\":%d,\"r\":%.3f,\"x\":%d,\"eps\":%.3f,"
                 "\"hun\":%.1f,\"ene\":%.1f,\"joy\":%.1f,\"hp\":%.1f,\"room\":%d,"
-                "\"falls\":%lu,\"snacks\":%lu,\"kicks\":%lu,\"age\":%.0f,\"ms\":%lu}\n",
+                "\"falls\":%lu,\"snacks\":%lu,\"kicks\":%lu,\"age\":%.0f,\"dreams\":%lu,\"ms\":%lu}\n",
                 (unsigned long)brain.decisions, curState, (int)pet.action, reward, brain.lastWasExplore ? 1 : 0,
                 brain.epsilon(), pet.hunger, pet.energy, pet.joy, pet.health, (int)s.room,
                 (unsigned long)pet.falls, (unsigned long)pet.treats, (unsigned long)pet.kicks, pet.age,
-                (unsigned long)millis());
+                (unsigned long)brain.dreams, (unsigned long)millis());
 }
 
 void sendBrain() {
@@ -833,6 +834,13 @@ void updateWorld(float dt) {
   if (floating != wasFloating) { wasFloating = floating; if (floating) say(SAY_FLOAT, true); }
   if (millis() - lastSayMs > 25000 && !pet.asleep) say(SAY_IDLE, false);
 
+  // Asleep: learn in dreams (about a thousand lessons a second).
+  if (pet.asleep) {
+    static uint32_t lastReported = 0;
+    dream(brain, 40);
+    if (brain.dreams - lastReported >= 2000) { lastReported = brain.dreams; sendEvent("dream", brain.dreams); }
+  }
+
   // Bed shape follows the floor: wide along it, short away from it.
   uint8_t fw = floorWall(gScreen);
   bool sideways = !floating && (fw == WALL_L || fw == WALL_R);
@@ -1185,6 +1193,26 @@ void drawBubbleAt(float px, float py, float pr, const char *txt, uint16_t fill) 
   for (int i = 0; i < count; i++) textAt(F_SMALL, bx + padX, by + padY + 12 + i * lineH, lines[i], rgb(30, 28, 40));
 }
 
+// While Bloop sleeps: a little thought cloud showing it learning in its dream.
+void drawDreamCloud() {
+  static const char *const DREAMS[] = {"snacks", "holding on", "naps", "the ball", "you", "dancing", "the window"};
+  char txt[40];
+  snprintf(txt, sizeof(txt), "dreaming of %s... %lu lessons", DREAMS[(millis() / 2500) % 7], (unsigned long)brain.dreams);
+  int w = (int)strlen(txt) * 6 + 16, h = 20;
+  float top = pet.body.y - pet.body.r - 26;
+  int bx = (int)clampf(pet.body.x - w / 2, ROOM_L + 4, ROOM_R - w - 4);
+  int by = (int)clampf(top - h, ROOM_T + 4, ROOM_B - h - 4);
+  uint16_t cloud = lightsOff ? rgb(70, 70, 110) : rgb(225, 228, 250);
+  cv->fillCircle(pet.body.x + 6, pet.body.y - pet.body.r - 6, 3, cloud);
+  cv->fillCircle(pet.body.x + 11, pet.body.y - pet.body.r - 15, 4, cloud);
+  cv->fillRoundRect(bx, by, w, h, 10, cloud);
+  cv->setFont((const GFXfont *)NULL);
+  cv->setTextSize(1);
+  cv->setTextColor(lightsOff ? rgb(230, 230, 250) : rgb(60, 56, 100));
+  cv->setCursor(bx + 8, by + 6);
+  cv->print(txt);
+}
+
 // Soft shadow on the floor under Bloop.
 void drawShadow() {
   if (floating || pet.held) return;
@@ -1261,6 +1289,7 @@ void drawRoom() {
     drawShadow();
     drawBloop();
     if (pet.asleep && nearBed(12)) drawBlanketOverBloop();
+    if (pet.asleep) drawDreamCloud();
   }
   drawVisitor();
 
@@ -1451,7 +1480,8 @@ void drawBrain() {
   cv->setTextSize(1);
   cv->setTextColor(RGB565_LIGHTGREY);
   cv->setCursor(10, HUD_H + 34);
-  cv->printf("Choices learned from: %lu   Exploring: %d%%", (unsigned long)brain.decisions, (int)(brain.epsilon() * 100));
+  cv->printf("Learned from: %lu choices, %lu dreams  Exploring %d%%", (unsigned long)brain.decisions,
+             (unsigned long)brain.dreams, (int)(brain.epsilon() * 100));
   cv->setCursor(10, HUD_H + 46);
   cv->printf("Age %dm  Falls %lu  Snacks %lu  Kicks %lu", (int)(pet.age / 60), (unsigned long)pet.falls,
              (unsigned long)pet.treats, (unsigned long)pet.kicks);
@@ -1599,7 +1629,7 @@ void drawMenu() {
   menuButton(0, 1, "Toy", buf, rgb(206, 72, 84));
   menuButton(1, 1, toyOut ? "Put toy away" : "Bring toy", toyOut ? "take it out of the room" : "back into the room", rgb(150, 80, 120));
   menuButton(0, 2, "Clean up", "remove all snacks", rgb(64, 128, 92));
-  menuButton(1, 2, "Bedtime", pet.asleep ? "Bloop is asleep" : "send Bloop to bed", rgb(96, 72, 150));
+  menuButton(1, 2, "Bedtime", "nap + learn in dreams", rgb(96, 72, 150));
   menuButton(0, 3, "Tilt setup", "which way is down", rgb(52, 76, 128));
   menuButton(1, 3, "Back", "to the room", rgb(70, 68, 90));
 }
@@ -1635,7 +1665,11 @@ void menuTap(int x, int y) {
       break;
     case 5:
       startAction(ACT_SLEEP);
+      pet.asleep = true;
       sinceDecide = 0;
+      dream(brain, 20000);   // a big dream right away; it keeps dreaming while it sleeps
+      sendEvent("dream", brain.dreams);
+      saveAll();
       screen = SCR_ROOM;
       break;
     case 6: calStep = 0; calMsg = ""; screen = SCR_CAL; break;

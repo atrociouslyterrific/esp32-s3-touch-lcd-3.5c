@@ -187,6 +187,7 @@ a { color: var(--series-1); }
         <div class="tile"><div class="label">Choices learned from</div><div class="value" id="tDecisions">–</div><div class="hint">every choice updates its brain</div></div>
         <div class="tile"><div class="label">Level</div><div class="value" id="tLevel">–</div><div class="hint">1 level per 40 choices</div></div>
         <div class="tile"><div class="label">Trying random things</div><div class="value" id="tEps">–</div><div class="hint">drops as it grows up</div></div>
+        <div class="tile"><div class="label">Dream lessons</div><div class="value" id="tDreams">–</div><div class="hint">practice while it sleeps</div></div>
         <div class="tile"><div class="label">Hard falls</div><div class="value" id="tFalls">–</div></div>
         <div class="tile"><div class="label">Snacks eaten</div><div class="value" id="tSnacks">–</div></div>
         <div class="tile"><div class="label">Ball kicks</div><div class="value" id="tKicks">–</div></div>
@@ -463,6 +464,7 @@ function drawNow() {
   setText("tLevel", Math.floor(last.n / 40) + 1);
   setText("tEps", Math.round(last.eps * 100) + "%");
   setText("tFalls", last.falls);
+  setText("tDreams", (last.dreams || 0).toLocaleString());
   setText("tSnacks", last.snacks);
   setText("tKicks", last.kicks);
   setText("nowText", "Doing: " + ACTIONS[last.a] + (last.x ? " (trying something random)" : "") + ". Feeling " + describe(last.s) + ".");
@@ -594,6 +596,7 @@ function drawRecent() {
 }
 
 const EVENT_TEXT = {
+  dream: v => ["Learned in a dream", "good", Math.round(v).toLocaleString() + " dream lessons so far"],
   fall: v => ["Hard landing", "bad", "hurt " + v.toFixed(1)],
   shake: v => ["Room shaken", "bad", ""],
   eat: v => ["Ate a snack", v > 55 ? "good" : (v < 20 ? "bad" : ""), v > 55 ? "was hungry" : (v < 20 ? "wasn't hungry: tummy ache" : "")],
