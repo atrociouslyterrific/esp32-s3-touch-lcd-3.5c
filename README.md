@@ -1,5 +1,7 @@
 # ESP32-S3-Touch-LCD-3.5-C projects
 
+[![Compile sketches](https://github.com/atrociouslyterrific/esp32-s3-touch-lcd-3.5c/actions/workflows/compile.yml/badge.svg)](https://github.com/atrociouslyterrific/esp32-s3-touch-lcd-3.5c/actions/workflows/compile.yml)
+
 Arduino sketches for the Waveshare **ESP32-S3-Touch-LCD-3.5-C**: an ESP32-S3 (16 MB flash, 8 MB PSRAM) with a 3.5" 320×480 IPS screen and capacitive touch. The -C version also comes with an OV5640 camera.
 
 ## Sketches
