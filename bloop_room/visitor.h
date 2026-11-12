@@ -140,12 +140,25 @@ uint8_t pipTopicOf(const char *line) {
   int i = 0;
   for (; line[i] && i < 57; i++) low[i] = tolower((unsigned char)line[i]);
   low[i] = 0;
-  auto has = [&](const char *w) { return strstr(low, w) != nullptr; };
-  if (has("food") || has("snack") || has("eat") || has("hungry") || has("yum") || has("crumb")) return PT_FOOD_TALK;
-  if (has("sleep") || has("nap") || has("tired") || has("yawn") || has("zzz") || has("bed") || has("dream")) return PT_SLEEP_TALK;
-  if (has("play") || has("dance") || has("sing") || has("fun") || has("game") || has("jump") || has("la la")) return PT_PLAY_TALK;
-  if (has("cold") || has("warm") || has("hot") || has("sun") || has("rain") || has("weather") || has("chilly")) return PT_WEATHER_TALK;
-  if (has("love") || has("friend") || has("like you") || has("hug") || has("<3")) return PT_LOVE_TALK;
+  // Does a word start with w? ("eat" matches "eat" and "eating", not "great".)
+  auto has = [&](const char *w) {
+    for (const char *p = strstr(low, w); p; p = strstr(p + 1, w))
+      if (p == low || !isalpha((unsigned char)p[-1])) return true;
+    return false;
+  };
+  // Words from Pip's own voice count too (its "tummy", "pats", "chilly", "boing"...).
+  if (has("food") || has("snack") || has("eat") || has("hungry") || has("yum") || has("crumb") ||
+      has("tummy") || has("treat") || has("cookie") || has("berr") || has("munch")) return PT_FOOD_TALK;
+  if (has("sleep") || has("nap") || has("tired") || has("yawn") || has("zzz") || has("bed") || has("dream") ||
+      has("snore") || has("pooped") || has("comfy") || has("five more") || has("night")) return PT_SLEEP_TALK;
+  if (has("play") || has("dance") || has("sing") || has("fun") || has("game") || has("jump") || has("la la") ||
+      has("boing") || has("tag") || has("catch") || has("wiggle") || has("bored") || has("groovy") ||
+      has("adventure") || has("explore")) return PT_PLAY_TALK;
+  if (has("cold") || has("warm") || has("hot") || has("sun") || has("rain") || has("weather") || has("chilly") ||
+      has("brr") || has("freez") || has("toasty") || has("melt") || has("heater") || has("blanket") ||
+      has("sky") || has("cloud") || has("moon") || has("star") || has("breeze")) return PT_WEATHER_TALK;
+  if (has("love") || has("friend") || has("like you") || has("hug") || has("<3") || has("favourite") ||
+      has("pats") || has("miss you") || has("tickles") || has("best")) return PT_LOVE_TALK;
   if (has("?")) return PT_QUESTION;
   return PT_ANY_TALK;
 }
