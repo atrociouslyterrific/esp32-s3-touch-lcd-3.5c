@@ -12,22 +12,14 @@
 // - Its brain and stats are saved, so it remembers after being unplugged.
 
 #include <Arduino_GFX_Library.h>
-#include <TCA9554.h>
+#include "board.h"
 #include <TouchDrvFT6X36.hpp>
 #include <SensorQMI8658.hpp>
 #include <Preferences.h>
 #include "world.h"
 #include "brain.h"
 
-// ---- Board pins (from Waveshare's examples) ----
-#define LCD_BL 6
-#define SPI_MISO 2
-#define SPI_MOSI 1
-#define SPI_SCLK 5
-#define LCD_DC 3
-#define I2C_SDA 8
-#define I2C_SCL 7
-#define EXP_LCD_RST 1           // TCA9554 pin wired to the LCD reset
+// Board pins are in board.h
 #define LCD_SPI_HZ 80000000     // Waveshare's own firmware runs the screen at 80 MHz
 
 // ---- Screens ----
@@ -50,6 +42,9 @@ struct Pet {
 
 // ---- Hardware objects ----
 TCA9554 expander(0x20);
+XPowersPMU pmu;
+BoardStatus boardSt;
+bool screenOk = false, backlightOn = false;
 TouchDrvFT6X36 touch;
 SensorQMI8658 imu;
 Preferences prefs;
@@ -1171,24 +1166,39 @@ void readCommands() {
 
 // ============================================================ setup & loop
 
-void resetLcd() {
-  expander.write1(EXP_LCD_RST, 1); delay(10);
-  expander.write1(EXP_LCD_RST, 0); delay(10);
-  expander.write1(EXP_LCD_RST, 1); delay(200);
+// Startup report, for the website's "Board log" and the Serial Monitor.
+void sendBootReport() {
+  Serial.printf("[boot] Bloop's Room | reset: %s%s | PSRAM %s (%u KB free) | heap %u KB free\n",
+                resetReasonName(boardSt.reason), boardSt.coldRestart ? " (after cold-start restart)" : "",
+                boardSt.psram ? "found" : "NOT FOUND", (unsigned)(ESP.getFreePsram() / 1024),
+                (unsigned)(ESP.getFreeHeap() / 1024));
+  Serial.printf("[boot] IO expander %s | power chip %s | screen %s | touch %s | motion sensor %s\n",
+                boardSt.expander ? "ok" : "MISSING", boardSt.pmu ? "ok" : "MISSING",
+                screenOk ? "ok" : "FAILED", touchOk ? "ok" : "MISSING", imuOk ? "ok" : "MISSING");
 }
 
 void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);   // never stall the game when no computer is listening
-  Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(400000);
-  expander.begin();
-  expander.pinMode1(EXP_LCD_RST, OUTPUT);
-  resetLcd();
+  boardSt = boardPowerUp(expander, pmu);
 
-  if (!cv->begin(LCD_SPI_HZ)) Serial.println("Screen or framebuffer init failed");
-  pinMode(LCD_BL, OUTPUT);
-  digitalWrite(LCD_BL, HIGH);
+  screenOk = cv->begin(LCD_SPI_HZ);
+  if (!screenOk) {
+    // No framebuffer (usually PSRAM missing): say so on the screen directly.
+    lcd->begin(LCD_SPI_HZ);
+    lcd->fillScreen(RGB565_BLACK);
+    lcd->setTextColor(RGB565_RED);
+    lcd->setTextSize(2);
+    lcd->setCursor(10, 40);
+    lcd->println("Bloop can't start:");
+    lcd->println("no memory for the");
+    lcd->println("screen buffer.");
+    lcd->println();
+    lcd->println(boardSt.psram ? "PSRAM found but full" : "PSRAM not found.");
+    lcd->println("Check Tools > PSRAM");
+    lcd->println("= OPI PSRAM.");
+    boardBacklight(true);
+  }
 
   touchOk = touch.begin(Wire, FT6X36_SLAVE_ADDRESS);
   imuOk = imu.begin(Wire, QMI8658_L_SLAVE_ADDRESS);
@@ -1196,7 +1206,7 @@ void setup() {
     imu.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_250Hz, SensorQMI8658::LPF_MODE_0);
     imu.enableAccelerometer();
   }
-  Serial.printf("touch %s, motion sensor %s\n", touchOk ? "ok" : "MISSING", imuOk ? "ok" : "MISSING");
+  sendBootReport();
 
   prefs.begin("bloop", false);
   loadAll();
@@ -1216,8 +1226,13 @@ void setup() {
   lastFrameMs = millis();
 }
 
+uint32_t bootReportAt = 0;
+
 void loop() {
   uint32_t now = millis();
+  // Repeat the startup report now and then, so a computer that connects late still sees it.
+  if (now - bootReportAt > (now < 30000 ? 3000u : 60000u)) { bootReportAt = now; sendBootReport(); }
+  if (!screenOk) { delay(100); return; }
   float dt = clampf((now - lastFrameMs) / 1000.0f, 0.001f, 0.05f);
   lastFrameMs = now;
 
@@ -1228,6 +1243,7 @@ void loop() {
   if (screen == SCR_CAL) {
     drawCal();
     cv->flush();
+    if (!backlightOn) { boardBacklight(true); backlightOn = true; }
     return;
   }
 
@@ -1250,4 +1266,5 @@ void loop() {
   drawHud();
   drawToolbar();
   cv->flush();
+  if (!backlightOn) { boardBacklight(true); backlightOn = true; }
 }

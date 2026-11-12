@@ -43,6 +43,7 @@ These pins come from [Waveshare's official examples](https://github.com/waveshar
    - **GFX Library for Arduino** by Moon On Our Nation (1.6.9 or newer; older versions do not build with ESP32 core 3.3.6+)
    - **SensorLib** by Lewis He (tested with 0.3.1)
    - **TCA9554** by Rob Tillaart (tested with 0.1.2)
+   - **XPowersLib** by Lewis He (tested with 0.2.9)
 3. Choose these settings in the **Tools** menu:
 
 | Setting | Value |

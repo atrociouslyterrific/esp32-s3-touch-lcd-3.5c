@@ -27,7 +27,7 @@ jobs:
         run: |
           arduino-cli core update-index --additional-urls "$ESP32_URL"
           arduino-cli core install esp32:esp32@3.3.12 --additional-urls "$ESP32_URL"
-          arduino-cli lib install "GFX Library for Arduino@1.6.9" "SensorLib@0.3.1" "TCA9554@0.1.2"
+          arduino-cli lib install "GFX Library for Arduino@1.6.9" "SensorLib@0.3.1" "TCA9554@0.1.2" "XPowersLib@0.2.9"
 
       - name: Compile the sketches
         run: |
@@ -42,29 +42,36 @@ jobs:
         run: |
           mkdir -p _site/firmware
           cp -r site/. _site/
-          B=build/bloop_room
-          cp "$B/bloop_room.ino.bootloader.bin" _site/firmware/bootloader.bin
-          cp "$B/bloop_room.ino.partitions.bin" _site/firmware/partitions.bin
-          cp "$B/bloop_room.ino.bin"            _site/firmware/bloop_room.bin
-          cp "$(find ~/.arduino15/packages/esp32/hardware/esp32 -name boot_app0.bin | head -1)" _site/firmware/boot_app0.bin
+          BOOT_APP0="$(find ~/.arduino15/packages/esp32/hardware/esp32 -name boot_app0.bin | head -1)"
+          cp "$BOOT_APP0" _site/firmware/boot_app0.bin
           # Separate parts (not one merged file) so updating never wipes Bloop's saved brain.
-          cat > _site/manifest.json <<JSON
+          for sketch in bloop_room hello_touch; do
+            B=build/$sketch
+            cp "$B/$sketch.ino.bootloader.bin" _site/firmware/$sketch-bootloader.bin
+            cp "$B/$sketch.ino.partitions.bin" _site/firmware/$sketch-partitions.bin
+            cp "$B/$sketch.ino.bin"            _site/firmware/$sketch.bin
+          done
+          write_manifest() {
+            cat > "_site/$1" <<JSON
           {
-            "name": "Bloop's Room",
+            "name": "$2",
             "version": "${GITHUB_SHA::7}",
             "new_install_prompt_erase": false,
             "builds": [{
               "chipFamily": "ESP32-S3",
               "parts": [
-                { "path": "firmware/bootloader.bin", "offset": 0 },
-                { "path": "firmware/partitions.bin", "offset": 32768 },
+                { "path": "firmware/$3-bootloader.bin", "offset": 0 },
+                { "path": "firmware/$3-partitions.bin", "offset": 32768 },
                 { "path": "firmware/boot_app0.bin",  "offset": 57344 },
-                { "path": "firmware/bloop_room.bin", "offset": 65536 }
+                { "path": "firmware/$3.bin", "offset": 65536 }
               ]
             }]
           }
           JSON
-          cat _site/manifest.json
+          }
+          write_manifest manifest.json "Bloop's Room" bloop_room
+          write_manifest manifest-hello.json "Screen and touch test" hello_touch
+          cat _site/manifest.json _site/manifest-hello.json
           ls -la _site _site/firmware
 
       - uses: actions/upload-pages-artifact@v3

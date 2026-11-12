@@ -157,8 +157,13 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; margin-
           <span slot="unsupported" class="warn">Installing needs Chrome or Edge on a computer.</span>
           <span slot="not-allowed" class="warn">Installing needs this page to be opened over https.</span>
         </esp-web-install-button>
+        <esp-web-install-button manifest="manifest-hello.json">
+          <button slot="activate" class="ghost">Install screen test</button>
+          <span slot="unsupported"></span><span slot="not-allowed"></span>
+        </esp-web-install-button>
         <span class="note" id="buildInfo" style="margin:0"></span>
       </div>
+      <p class="note" style="margin-top:8px">Screen stays dark? Press the board's <b>RESET</b> button once after installing. If it's still dark, connect below and read the <b>Board log</b>: it says what the board found when it started. The screen test is a simpler program for checking the screen and touch.</p>
       <h2 style="margin-top:14px">2. Watch it learn</h2>
       <ol class="steps">
         <li>After installing, close the install window. Then click <b>Connect to Bloop</b> (top right) and pick the board's USB port.</li>
@@ -221,6 +226,12 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; margin-
       <h2>What happened</h2>
       <p class="note">Things Bloop will remember.</p>
       <ul class="log" id="log"><li class="empty" style="display:block">Nothing yet.</li></ul>
+    </section>
+
+    <section class="card span-12">
+      <h2>Board log</h2>
+      <p class="note">Messages from the board itself, like its startup report and any crash. Useful if something isn't working.</p>
+      <pre id="boardLog" style="margin:0;max-height:220px;overflow:auto;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink-2);white-space:pre-wrap">Connect to see messages.</pre>
     </section>
 
     <section class="card span-12">
@@ -544,9 +555,21 @@ function queueDraw() {
   requestAnimationFrame(() => { drawQueued = false; redrawAll(); });
 }
 
+let boardLines = [];
+function addBoardLine(line) {
+  if (!line) return;
+  boardLines.push(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) + "  " + line);
+  if (boardLines.length > 300) boardLines = boardLines.slice(-300);
+  const pre = document.getElementById("boardLog");
+  const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+  pre.textContent = boardLines.join("\n");
+  if (atBottom) pre.scrollTop = pre.scrollHeight;
+}
+
 function handleLine(line) {
+  line = line.replace(/\r/g, "").trimEnd();
+  if (!line.trim().startsWith("{")) { addBoardLine(line); return; }
   line = line.trim();
-  if (!line.startsWith("{")) return;
   let m; try { m = JSON.parse(line); } catch (e) { return; }
   if (m.t === "d") {
     last = m;
@@ -578,7 +601,7 @@ function setConnected(on, text) {
 async function connect() {
   if (port) { await disconnect(); return; }
   try {
-    port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x303a }] });
+    port = await navigator.serial.requestPort();
     await port.open({ baudRate: 115200 });
     try { await port.setSignals({ dataTerminalReady: true, requestToSend: false }); } catch (e) {}
     const enc = new TextEncoderStream();

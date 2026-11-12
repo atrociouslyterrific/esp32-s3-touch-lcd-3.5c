@@ -8,25 +8,18 @@
 // (github.com/waveshareteam/ESP32-S3-Touch-LCD-3.5).
 
 #include <Arduino_GFX_Library.h>
-#include <TCA9554.h>
 #include <TouchDrvFT6X36.hpp>
+#include "board.h"   // pins and power-up
 
-// ---- Board pins ----
-#define LCD_BL     6    // backlight
-#define SPI_MISO   2
-#define SPI_MOSI   1
-#define SPI_SCLK   5
-#define LCD_DC     3
 #define LCD_CS    -1    // tied low on the board
 #define LCD_RST   -1    // reset goes through the TCA9554 IO expander instead
-#define I2C_SDA    8
-#define I2C_SCL    7
-#define EXP_LCD_RST 1   // TCA9554 pin wired to the LCD reset
 
 #define LCD_W 320
 #define LCD_H 480
 
 TCA9554 expander(0x20);
+XPowersPMU pmu;
+BoardStatus boardSt;
 TouchDrvFT6X36 touch;
 
 Arduino_DataBus *bus = new Arduino_ESP32SPI(LCD_DC, LCD_CS, SPI_SCLK, SPI_MOSI, SPI_MISO);
@@ -47,15 +40,6 @@ uint16_t penColor = RGB565_WHITE;
 bool wasTouching = false;
 int16_t lastX, lastY;
 uint32_t touchCount = 0;
-
-void resetLcd() {
-  expander.write1(EXP_LCD_RST, 1);
-  delay(10);
-  expander.write1(EXP_LCD_RST, 0);
-  delay(10);
-  expander.write1(EXP_LCD_RST, 1);
-  delay(200);
-}
 
 void drawReadout(const char *text) {
   gfx->fillRect(0, 40, LCD_W, 26, RGB565_BLACK);
@@ -130,25 +114,20 @@ void handleTap(int16_t x, int16_t y) {
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("hello_touch starting");
+  Serial.setTxTimeoutMs(0);
+  boardSt = boardPowerUp(expander, pmu);
 
-  Wire.begin(I2C_SDA, I2C_SCL);
-  expander.begin();
-  expander.pinMode1(EXP_LCD_RST, OUTPUT);
-  resetLcd();
-
-  if (!gfx->begin()) {
-    Serial.println("Display init failed");
-  }
-  pinMode(LCD_BL, OUTPUT);
-  digitalWrite(LCD_BL, HIGH);
-
+  bool screenOk = gfx->begin(40000000);
   drawScreen();
+  boardBacklight(true);
 
-  if (!touch.begin(Wire, FT6X36_SLAVE_ADDRESS)) {
-    Serial.println("Touch controller (FT6336) not found");
-    drawReadout("Touch chip not found!");
-  }
+  bool touchOk = touch.begin(Wire, FT6X36_SLAVE_ADDRESS);
+  if (!touchOk) drawReadout("Touch chip not found!");
+
+  Serial.printf("[boot] hello_touch | reset: %s | PSRAM %s | IO expander %s | power chip %s | screen %s | touch %s\n",
+                resetReasonName(boardSt.reason), boardSt.psram ? "found" : "NOT FOUND",
+                boardSt.expander ? "ok" : "MISSING", boardSt.pmu ? "ok" : "MISSING",
+                screenOk ? "ok" : "FAILED", touchOk ? "ok" : "MISSING");
 }
 
 void loop() {
