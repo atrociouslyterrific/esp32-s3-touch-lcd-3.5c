@@ -78,6 +78,29 @@ Screen screen = SCR_ROOM;
 
 // Options (MORE menu)
 bool lightsOff = false;
+
+// ---- Day and night ----
+// Bloop's room has its own clock: one hour passes every real minute, so a whole
+// day takes 24 minutes. The window shows the sun and moon moving, the room gets
+// darker at night, and Bloop gets sleepy. Saved when the board is unplugged.
+float clockMin = 8 * 60;   // minutes since midnight in Bloop's room (starts at 8 am)
+const float CLOCK_MIN_PER_SEC = 1.0f;
+float clockHours() { return clockMin / 60.0f; }
+// How much sun: 0 at night, 1 in the day, ramps at dawn (5-7) and dusk (18-21).
+float daylight() {
+  float h = clockHours();
+  if (h < 5 || h >= 21) return 0;
+  if (h < 7) return (h - 5) / 2;
+  if (h < 18) return 1;
+  return 1 - (h - 18) / 3;
+}
+bool isNight() { return daylight() < 0.2f; }
+bool roomDark() { return lightsOff || isNight(); }
+// How bright the room is: lamps on keep it fairly bright even at night.
+float roomBrightness() {
+  float d = daylight();
+  return lightsOff ? 0.35f + 0.6f * d : 0.75f + 0.25f * d;
+}
 enum Toy : uint8_t { TOY_BALL, TOY_BLOCK, TOY_BEACH, NUM_TOYS };
 const char *const TOY_NAMES[NUM_TOYS] = {"BALL", "BLOCK", "BEACH BALL"};
 uint8_t toy = TOY_BALL;
@@ -208,6 +231,7 @@ void saveAll() {
   prefs.putUInt("kicks", pet.kicks);
   prefs.putBool("dark", lightsOff);
   prefs.putUChar("toy", toy);
+  prefs.putFloat("clock", clockMin);
 }
 
 void loadAll() {
@@ -221,6 +245,7 @@ void loadAll() {
   pet.treats = prefs.getUInt("treats", 0);
   pet.kicks = prefs.getUInt("kicks", 0);
   lightsOff = prefs.getBool("dark", false);
+  clockMin = fmodf(prefs.getFloat("clock", 8 * 60), 1440);
   toy = prefs.getUChar("toy", TOY_BALL) % NUM_TOYS;
   toyOut = prefs.getBool("toyOut", true);
   axisY = prefs.getUChar("axY", 1);
@@ -432,7 +457,7 @@ void say(uint8_t ev, bool important) {
   prompt[n++] = s.tired ? BV_TOK_ENERGY_TIRED : BV_TOK_ENERGY_AWAKE;
   prompt[n++] = pet.joy > 65 ? BV_TOK_MOOD_HAPPY : (pet.joy < 30 ? BV_TOK_MOOD_SAD : BV_TOK_MOOD_OK);
   prompt[n++] = s.room == ROOM_CALM ? BV_TOK_ROOM_CALM : (s.room == ROOM_TILTING ? BV_TOK_ROOM_TILT : BV_TOK_ROOM_FLOAT);
-  if (lightsOff) prompt[n++] = BV_TOK_DARK;
+  if (roomDark()) prompt[n++] = BV_TOK_DARK;
   if (s.attention) prompt[n++] = BV_TOK_YOU;
   if (ev == SAY_PIP) prompt[n++] = PIP_TOPIC_TOKENS[pipTopic % NUM_PIP_TOPICS];
   prompt[n++] = SAY_TOKENS[ev];
@@ -707,7 +732,7 @@ void petBehave(float dt) {
   if (pet.asleep) {
     bool onBed = vlen(v2(bed.x - b.x, bed.y - b.y)) < b.r + bed.r + 10;
     pet.energy += (onBed ? 4.0f : 2.0f) * dt;
-    float cozy = lightsOff ? 1.5f : 1.0f;   // sleeping is nicer in the dark
+    float cozy = roomDark() ? 1.5f : 1.0f;   // sleeping is nicer in the dark (or at night)
     if (pet.energy < 40) rewardAcc += 0.6f * cozy * dt;
     else if (pet.energy > 85) rewardAcc -= 0.3f * dt;
     else rewardAcc += 0.1f * dt;
@@ -786,7 +811,12 @@ void resolveContacts() {
 void updateNeeds(float dt) {
   pet.age += dt;
   pet.hunger = clampf(pet.hunger + 0.18f * dt, 0, 100);
-  if (!pet.asleep) pet.energy -= (lightsOff ? 0.25f : 0.10f) * dt;
+  // Awake at night (or in the dark) makes Bloop sleepy faster.
+  if (!pet.asleep) pet.energy -= (0.10f + (isNight() ? 0.10f : 0) + (lightsOff ? 0.08f : 0)) * dt;
+
+  // The room's clock ticks on.
+  clockMin += dt * CLOCK_MIN_PER_SEC;
+  if (clockMin >= 1440) clockMin -= 1440;
   pet.energy = clampf(pet.energy, 0, 100);
   pet.joy = clampf(pet.joy - 0.10f * dt, 0, 100);
   if (pet.hunger < 80) pet.health = clampf(pet.health + 0.15f * dt, 0, 100);
@@ -1193,6 +1223,67 @@ void drawBubbleAt(float px, float py, float pr, const char *txt, uint16_t fill) 
   for (int i = 0; i < count; i++) textAt(F_SMALL, bx + padX, by + padY + 12 + i * lineH, lines[i], rgb(30, 28, 40));
 }
 
+// ---- The window: the sky follows the room's clock ----
+// Sky colour through the day: night, dawn, day, dusk, night.
+void skyColor(float h, uint8_t &r, uint8_t &g, uint8_t &b) {
+  const float hours[] = {0, 5, 6.2f, 7.5f, 17.5f, 19, 20.5f, 24};
+  const uint8_t cols[][3] = {{18, 22, 56}, {18, 22, 56}, {240, 150, 120}, {120, 190, 240},
+                             {120, 190, 240}, {240, 120, 80}, {18, 22, 56}, {18, 22, 56}};
+  int i = 0;
+  while (i < 6 && h >= hours[i + 1]) i++;
+  float t = (h - hours[i]) / (hours[i + 1] - hours[i]);
+  r = cols[i][0] + (cols[i + 1][0] - cols[i][0]) * t;
+  g = cols[i][1] + (cols[i + 1][1] - cols[i][1]) * t;
+  b = cols[i][2] + (cols[i + 1][2] - cols[i][2]) * t;
+}
+
+void drawWindow(int wx, int wy, int ww, int wh) {
+  float h = clockHours();
+  uint8_t sr, sg, sb;
+  skyColor(h, sr, sg, sb);
+  cv->fillRect(wx, wy, ww, wh, rgb(sr, sg, sb));
+
+  // Stars come out as it gets dark.
+  float dark = 1 - daylight();
+  if (dark > 0.6f) {
+    const uint8_t stars[][2] = {{12, 10}, {30, 32}, {48, 14}, {70, 40}, {92, 12}, {20, 62}, {84, 66}, {60, 70}, {100, 34}};
+    for (int i = 0; i < 9; i++)
+      if ((i + (int)(millis() / 700)) % 7 != 0) cv->drawPixel(wx + stars[i][0], wy + stars[i][1], RGB565_WHITE);
+  }
+  // The sun crosses the window from 6 am to 7:30 pm, the moon from 7 pm to 6:30 am.
+  auto arc = [&](float p, int &x, int &y) {
+    x = wx + 12 + (int)(p * (ww - 24));
+    y = wy + wh - 14 - (int)(sinf(p * PI) * (wh - 34));
+  };
+  int x, y;
+  if (h >= 6 && h <= 19.5f) {
+    arc((h - 6) / 13.5f, x, y);
+    cv->fillCircle(x, y, 10, h < 7.5f || h > 17.5f ? rgb(255, 170, 90) : rgb(255, 220, 90));
+  }
+  if (h >= 19 || h <= 6.5f) {
+    float p = (h >= 19 ? h - 19 : h + 5) / 11.5f;
+    arc(p, x, y);
+    cv->fillCircle(x, y, 9, rgb(250, 240, 200));
+    cv->fillCircle(x + 5, y - 3, 8, rgb(sr, sg, sb));   // crescent
+  }
+  // Clouds drift by in the day.
+  if (daylight() > 0.4f) {
+    int cx = wx + 12 + (int)fmodf(clockMin * 0.9f, ww - 48);   // stays inside the glass
+    uint16_t c = rgb(245, 245, 250);
+    cv->fillCircle(cx, wy + 50, 10, c);
+    cv->fillCircle(cx + 12, wy + 46, 12, c);
+    cv->fillCircle(cx + 24, wy + 51, 9, c);
+  }
+  // Frame (drawn last so the edges of the sun and moon tuck under it)
+  uint16_t wood = rgb(140, 100, 70);
+  cv->fillRect(wx - 5, wy - 5, ww + 10, 5, wood);
+  cv->fillRect(wx - 5, wy + wh, ww + 10, 5, wood);
+  cv->fillRect(wx - 5, wy - 5, 5, wh + 10, wood);
+  cv->fillRect(wx + ww, wy - 5, 5, wh + 10, wood);
+  cv->fillRect(wx + ww / 2 - 2, wy, 4, wh, wood);
+  cv->fillRect(wx, wy + wh / 2 - 2, ww, 4, wood);
+}
+
 // While Bloop sleeps: a little thought cloud showing it learning in its dream.
 void drawDreamCloud() {
   static const char *const DREAMS[] = {"snacks", "holding on", "naps", "the ball", "you", "dancing", "the window"};
@@ -1202,13 +1293,13 @@ void drawDreamCloud() {
   float top = pet.body.y - pet.body.r - 26;
   int bx = (int)clampf(pet.body.x - w / 2, ROOM_L + 4, ROOM_R - w - 4);
   int by = (int)clampf(top - h, ROOM_T + 4, ROOM_B - h - 4);
-  uint16_t cloud = lightsOff ? rgb(70, 70, 110) : rgb(225, 228, 250);
+  uint16_t cloud = roomDark() ? rgb(70, 70, 110) : rgb(225, 228, 250);
   cv->fillCircle(pet.body.x + 6, pet.body.y - pet.body.r - 6, 3, cloud);
   cv->fillCircle(pet.body.x + 11, pet.body.y - pet.body.r - 15, 4, cloud);
   cv->fillRoundRect(bx, by, w, h, 10, cloud);
   cv->setFont((const GFXfont *)NULL);
   cv->setTextSize(1);
-  cv->setTextColor(lightsOff ? rgb(230, 230, 250) : rgb(60, 56, 100));
+  cv->setTextColor(roomDark() ? rgb(230, 230, 250) : rgb(60, 56, 100));
   cv->setCursor(bx + 8, by + 6);
   cv->print(txt);
 }
@@ -1226,37 +1317,20 @@ void drawShadow() {
   }
   if (gap > 140) return;
   int len = (int)(pet.body.r * (1.0f - gap / 200.0f)), thick = 3;
-  uint16_t c = lightsOff ? rgb(14, 12, 26) : rgb(36, 30, 60);
+  uint16_t c = roomDark() ? rgb(14, 12, 26) : rgb(36, 30, 60);
   if (fw == WALL_B || fw == WALL_T) cv->fillEllipse(x, y, len, thick, c);
   else cv->fillEllipse(x, y, thick, len, c);
 }
 
 void drawRoom() {
-  // Wallpaper (dimmer with the lights off)
-  uint16_t wall = lightsOff ? rgb(26, 22, 44) : rgb(58, 50, 92);
-  uint16_t stripe = lightsOff ? rgb(30, 26, 50) : rgb(66, 58, 104);
+  // Wallpaper, lit by the time of day (and the lamps)
+  float lit = roomBrightness();
+  uint16_t wall = rgb(58 * lit, 50 * lit, 92 * lit);
+  uint16_t stripe = rgb(66 * lit, 58 * lit, 104 * lit);
   cv->fillRect(0, HUD_H, SCREEN_W, TOOLBAR_Y - HUD_H, wall);
   for (int x = 12; x < SCREEN_W; x += 28) cv->fillRect(x, HUD_H, 8, TOOLBAR_Y - HUD_H, stripe);
 
-  // Window on the back wall: day sky, or night when Bloop sleeps
-  int wx = 105, wy = 120, ww = 110, wh = 86;
-  bool night = pet.asleep || lightsOff;
-  cv->fillRect(wx - 5, wy - 5, ww + 10, wh + 10, rgb(140, 100, 70));
-  cv->fillRect(wx, wy, ww, wh, night ? rgb(20, 24, 60) : rgb(120, 190, 240));
-  if (night) {
-    cv->fillCircle(wx + 80, wy + 25, 12, rgb(250, 240, 200));
-    cv->fillCircle(wx + 86, wy + 21, 11, rgb(20, 24, 60));
-    cv->fillCircle(wx + 20, wy + 15, 1, RGB565_WHITE);
-    cv->fillCircle(wx + 45, wy + 55, 1, RGB565_WHITE);
-    cv->fillCircle(wx + 30, wy + 40, 1, RGB565_WHITE);
-  } else {
-    cv->fillCircle(wx + 85, wy + 22, 11, rgb(255, 220, 90));
-    cv->fillCircle(wx + 30, wy + 50, 12, RGB565_WHITE);
-    cv->fillCircle(wx + 45, wy + 46, 14, RGB565_WHITE);
-    cv->fillCircle(wx + 60, wy + 52, 10, RGB565_WHITE);
-  }
-  cv->fillRect(wx + ww / 2 - 2, wy, 4, wh, rgb(140, 100, 70));
-  cv->fillRect(wx, wy + wh / 2 - 2, ww, 4, rgb(140, 100, 70));
+  drawWindow(105, 120, 110, 86);
 
   // Picture frame
   cv->fillRect(36, 270, 54, 42, rgb(190, 150, 70));
@@ -1375,6 +1449,17 @@ void drawHud() {
   cv->fillCircle(17, 20, 1, RGB565_BLACK); cv->fillCircle(27, 20, 1, RGB565_BLACK);
   cv->fillArc(22, 25, 5, 4, 20, 160, RGB565_BLACK);
   textAt(F_BOLD, 44, 20, "Bloop", rgb(140, 230, 200));
+  // The room's clock, with a little sun or moon
+  int hh = (int)clockHours(), mm = (int)clockMin % 60;
+  char clk[12];
+  snprintf(clk, sizeof(clk), "%d:%02d%s", hh % 12 == 0 ? 12 : hh % 12, mm, hh < 12 ? "am" : "pm");
+  cv->setFont((const GFXfont *)NULL);
+  cv->setTextSize(1);
+  cv->setTextColor(rgb(200, 198, 220));
+  cv->setCursor(102, 9);
+  cv->print(clk);
+  if (isNight()) { cv->fillCircle(144, 12, 4, rgb(250, 240, 200)); cv->fillCircle(146, 10, 4, rgb(22, 20, 34)); }
+  else cv->fillCircle(144, 12, 4, rgb(255, 210, 90));
   char sub[40];
   snprintf(sub, sizeof(sub), "Lv %lu  %s", (unsigned long)(brain.decisions / 40 + 1), pet.asleep ? "asleep" : ACTION_NAMES[pet.action]);
   cv->setTextSize(1);
