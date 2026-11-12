@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bloop Training Dashboard</title>
+<meta name="description" content="Install Bloop's Room on a Waveshare ESP32-S3-Touch-LCD-3.5-C and watch its brain learn, live over USB.">
+<script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11,11,11,0.10);
+  --series-1: #2a78d6;
+  --series-1-soft: rgba(42,120,214,0.18);
+  --div-pos: #2a78d6;
+  --div-neg: #e34948;
+  --div-mid: #f0efec;
+  --good: #0ca30c;
+  --critical: #d03b3b;
+  --accent: #1baf7a;
+  --btn: #1c1c1a;
+  --btn-ink: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5;
+    --series-1-soft: rgba(57,135,229,0.22);
+    --div-pos: #3987e5;
+    --div-neg: #e66767;
+    --div-mid: #383835;
+    --accent: #199e70;
+    --btn: #f0efec;
+    --btn-ink: #0b0b0b;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --series-1: #3987e5; --series-1-soft: rgba(57,135,229,0.22);
+  --div-pos: #3987e5; --div-neg: #e66767; --div-mid: #383835; --accent: #199e70;
+  --btn: #f0efec; --btn-ink: #0b0b0b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.wrap { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; }
+header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+h1 { font-size: 26px; margin: 0; letter-spacing: -0.01em; }
+.sub { color: var(--ink-2); margin: 4px 0 0; }
+h2 { font-size: 15px; margin: 0 0 4px; }
+.note { color: var(--ink-2); font-size: 13px; margin: 0 0 12px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(12, 1fr); }
+.span-12 { grid-column: span 12; } .span-8 { grid-column: span 8; } .span-4 { grid-column: span 4; }
+.span-6 { grid-column: span 6; }
+@media (max-width: 820px) { .span-8, .span-4, .span-6 { grid-column: span 12; } }
+button, .btn {
+  font: inherit; font-weight: 600; border: 0; border-radius: 8px; padding: 9px 14px;
+  background: var(--btn); color: var(--btn-ink); cursor: pointer;
+}
+button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--border); }
+button:disabled { opacity: 0.4; cursor: default; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.status { font-size: 13px; color: var(--ink-2); display: flex; align-items: center; gap: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.dot.on { background: var(--good); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+.tile .label { font-size: 12px; color: var(--ink-2); }
+.tile .value { font-size: 26px; font-weight: 650; margin-top: 2px; }
+.tile .hint { font-size: 12px; color: var(--muted); }
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.tip {
+  position: absolute; pointer-events: none; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12); white-space: nowrap; display: none; z-index: 5;
+}
+.tip strong { font-size: 13px; }
+.meter { display: grid; grid-template-columns: 64px 1fr 40px; gap: 8px; align-items: center; margin: 7px 0; font-size: 13px; }
+.meter .track { height: 8px; border-radius: 4px; background: var(--grid); overflow: hidden; }
+.meter .fill { height: 100%; border-radius: 4px; background: var(--series-1); width: 0; transition: width .4s; }
+.meter .num { text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.bars .bar-row { display: grid; grid-template-columns: 110px 1fr 36px; gap: 8px; align-items: center; margin: 5px 0; font-size: 13px; }
+.bars .track { height: 12px; position: relative; }
+.bars .fill { height: 100%; border-radius: 0 4px 4px 0; background: var(--series-1); }
+.bars .num { text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.habits { list-style: none; padding: 0; margin: 0; }
+.habits li { display: flex; justify-content: space-between; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--grid); font-size: 14px; }
+.habits li:last-child { border: 0; }
+.habits .act { font-weight: 650; }
+.habits .act.none { color: var(--muted); font-weight: 400; }
+.heat-wrap { max-height: 420px; overflow: auto; border: 1px solid var(--grid); border-radius: 8px; }
+table.heat { border-collapse: separate; border-spacing: 1px; font-size: 11px; width: 100%; }
+table.heat th { position: sticky; top: 0; background: var(--surface); color: var(--ink-2); font-weight: 600; padding: 4px 2px; z-index: 2; }
+table.heat td.lab { color: var(--ink-2); white-space: nowrap; padding: 0 6px; font-variant-numeric: tabular-nums; }
+table.heat td.cell { height: 14px; min-width: 34px; border-radius: 2px; }
+table.heat tr.now td.lab { color: var(--ink); font-weight: 700; }
+table.heat tr.now td.cell { outline: 2px solid var(--ink); outline-offset: -1px; }
+.legend { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); margin-top: 8px; }
+.legend .ramp { width: 160px; height: 10px; border-radius: 3px; background: linear-gradient(90deg, var(--div-neg), var(--div-mid), var(--div-pos)); }
+.log { font-size: 13px; max-height: 260px; overflow: auto; margin: 0; padding: 0; list-style: none; }
+.log li { padding: 5px 0; border-bottom: 1px solid var(--grid); display: flex; gap: 10px; }
+.log .t { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 64px; }
+.log .tag { font-weight: 650; }
+.log .tag.bad::before { content: "▼ "; color: var(--critical); }
+.log .tag.good::before { content: "▲ "; color: var(--good); }
+table.recent { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.recent th, table.recent td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--grid); }
+table.recent th { color: var(--ink-2); font-weight: 600; }
+table.recent td.n { font-variant-numeric: tabular-nums; text-align: right; }
+.empty { color: var(--muted); font-size: 13px; padding: 24px 0; text-align: center; }
+.steps { margin: 6px 0 0; padding-left: 20px; color: var(--ink-2); font-size: 14px; }
+.warn { color: var(--critical); font-size: 13px; }
+details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Bloop's training dashboard</h1>
+      <p class="sub">Watch Bloop learn, live, from the board on your desk.</p>
+    </div>
+    <div class="row">
+      <span class="status"><span class="dot" id="dot"></span><span id="statusText">Not connected</span></span>
+      <button id="connectBtn">Connect to Bloop</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="card span-12" id="setupCard">
+      <h2>1. Put Bloop on the board</h2>
+      <p class="note">Plug the ESP32-S3-Touch-LCD-3.5-C into this computer with a USB data cable, then click Install. GitHub built this firmware from the latest code. Updating keeps what Bloop has already learned.</p>
+      <div class="row">
+        <esp-web-install-button manifest="manifest.json">
+          <button slot="activate">Install Bloop</button>
+          <span slot="unsupported" class="warn">Installing needs Chrome or Edge on a computer.</span>
+          <span slot="not-allowed" class="warn">Installing needs this page to be opened over https.</span>
+        </esp-web-install-button>
+        <span class="note" id="buildInfo" style="margin:0"></span>
+      </div>
+      <h2 style="margin-top:14px">2. Watch it learn</h2>
+      <ol class="steps">
+        <li>After installing, close the install window. Then click <b>Connect to Bloop</b> (top right) and pick the board's USB port.</li>
+        <li>Charts appear as Bloop makes choices, one every couple of seconds.</li>
+      </ol>
+      <p class="warn" id="noSerial" hidden>This browser can't talk to USB devices. Use Chrome or Edge on a computer.</p>
+    </section>
+
+    <section class="span-12">
+      <div class="tiles">
+        <div class="tile"><div class="label">Choices learned from</div><div class="value" id="tDecisions">–</div><div class="hint">every choice updates its brain</div></div>
+        <div class="tile"><div class="label">Level</div><div class="value" id="tLevel">–</div><div class="hint">1 level per 40 choices</div></div>
+        <div class="tile"><div class="label">Trying random things</div><div class="value" id="tEps">–</div><div class="hint">drops as it grows up</div></div>
+        <div class="tile"><div class="label">Hard falls</div><div class="value" id="tFalls">–</div></div>
+        <div class="tile"><div class="label">Snacks eaten</div><div class="value" id="tSnacks">–</div></div>
+        <div class="tile"><div class="label">Ball kicks</div><div class="value" id="tKicks">–</div></div>
+      </div>
+    </section>
+
+    <section class="card span-8">
+      <h2>Is it getting better?</h2>
+      <p class="note">Average reward over its last 25 choices. Higher means Bloop is choosing things that work out: eating when hungry, sleeping when tired, not getting hurt, earning your GOOD.</p>
+      <div class="chart" id="rewardChart"></div>
+    </section>
+
+    <section class="card span-4">
+      <h2>Right now</h2>
+      <p class="note" id="nowText">Waiting for Bloop…</p>
+      <div id="meters"></div>
+      <h2 style="margin-top:14px">Train from here</h2>
+      <p class="note">Same as the buttons on the board.</p>
+      <div class="row">
+        <button class="ghost cmd" data-cmd="feed" disabled>Feed</button>
+        <button class="ghost cmd" data-cmd="ball" disabled>Ball</button>
+        <button class="ghost cmd" data-cmd="good" disabled>Good!</button>
+        <button class="ghost cmd" data-cmd="no" disabled>No!</button>
+      </div>
+    </section>
+
+    <section class="card span-6">
+      <h2>Habits so far</h2>
+      <p class="note">What its brain currently rates best in each situation.</p>
+      <ul class="habits" id="habits"></ul>
+    </section>
+
+    <section class="card span-6">
+      <h2>What it chose lately</h2>
+      <p class="note">Its last 100 choices.</p>
+      <div class="bars" id="mix"></div>
+    </section>
+
+    <section class="card span-8">
+      <h2>The whole brain</h2>
+      <p class="note">Every situation Bloop can be in (rows) and how good it thinks each action is there (columns). Blue = it expects that to go well, red = badly, gray = not learned yet. The outlined row is its situation right now. Hover a cell for the number.</p>
+      <div class="heat-wrap" id="heatWrap"><div class="empty">The brain arrives a few seconds after connecting.</div></div>
+      <div class="legend"><span>bad</span><span class="ramp"></span><span>good</span></div>
+    </section>
+
+    <section class="card span-4">
+      <h2>What happened</h2>
+      <p class="note">Things Bloop will remember.</p>
+      <ul class="log" id="log"><li class="empty" style="display:block">Nothing yet.</li></ul>
+    </section>
+
+    <section class="card span-12">
+      <h2>Recent choices</h2>
+      <p class="note">The numbers behind the reward chart. Reward is what Bloop got for its previous choice.</p>
+      <table class="recent"><thead><tr><th>#</th><th>Situation</th><th>Choice</th><th style="text-align:right">Reward</th></tr></thead><tbody id="recent"></tbody></table>
+      <details><summary>Clear saved history in this browser</summary>
+        <p class="note">The dashboard keeps the last 3,000 choices in this browser so the chart survives a reload. Bloop's brain lives on the board and isn't affected.</p>
+        <button class="ghost" id="clearBtn">Clear history</button>
+      </details>
+    </section>
+  </div>
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+const ACTIONS = ["Wander", "Chase ball", "Eat", "Sleep", "Grip wall", "Curl up", "Come to you", "Sit"];
+const ROOMS = ["calm", "tilting", "floating"];
+const NUM_STATES = 96;
+
+// Same layout as encodeState() in brain.h
+function decode(i) {
+  const s = {};
+  s.attention = i % 2; i = Math.floor(i / 2);
+  s.food = i % 2; i = Math.floor(i / 2);
+  s.ball = i % 2; i = Math.floor(i / 2);
+  s.room = i % 3; i = Math.floor(i / 3);
+  s.tired = i % 2; i = Math.floor(i / 2);
+  s.hungry = i % 2;
+  return s;
+}
+function describe(i) {
+  const s = decode(i);
+  const p = [s.hungry ? "hungry" : "full", s.tired ? "tired" : "awake", "room " + ROOMS[s.room]];
+  if (s.ball) p.push("ball near");
+  if (s.food) p.push("food out");
+  if (s.attention) p.push("you're there");
+  return p.join(", ");
+}
+function shortLabel(i) {
+  const s = decode(i);
+  return [s.hungry ? "H" : "·", s.tired ? "T" : "·", ["calm", "TILT", "0g"][s.room], s.ball ? "ball" : "", s.food ? "food" : "", s.attention ? "you" : ""]
+    .filter(Boolean).join(" ");
+}
+
+// ---------- state ----------
+let history = [];
+try { history = JSON.parse(localStorage.getItem("bloopHistory") || "[]"); } catch (e) { history = []; }
+let q = null, last = null, events = [];
+let writer = null;
+
+function saveHistory() {
+  try { localStorage.setItem("bloopHistory", JSON.stringify(history.slice(-3000))); } catch (e) {}
+}
+
+// ---------- tooltip ----------
+const tip = document.getElementById("tip");
+function showTip(evt, lines) {
+  tip.replaceChildren();
+  lines.forEach((l, k) => {
+    const d = document.createElement("div");
+    if (k === 0) { const b = document.createElement("strong"); b.textContent = l; d.appendChild(b); }
+    else d.textContent = l;
+    tip.appendChild(d);
+  });
+  tip.style.display = "block";
+  const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = evt.pageX + pad, y = evt.pageY + pad;
+  if (x + w > window.scrollX + document.documentElement.clientWidth - 8) x = evt.pageX - w - pad;
+  if (y + h > window.scrollY + window.innerHeight - 8) y = evt.pageY - h - pad;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+function hideTip() { tip.style.display = "none"; }
+
+// ---------- reward chart ----------
+const SVGNS = "http://www.w3.org/2000/svg";
+function el(name, attrs, parent) {
+  const e = document.createElementNS(SVGNS, name);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function niceTicks(lo, hi, n) {
+  const span = hi - lo || 1;
+  const step0 = Math.pow(10, Math.floor(Math.log10(span / n)));
+  const err = span / n / step0;
+  const step = step0 * (err >= 7.5 ? 10 : err >= 3.5 ? 5 : err >= 1.5 ? 2 : 1);
+  const out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(6));
+  return out;
+}
+function drawRewardChart() {
+  const box = document.getElementById("rewardChart");
+  box.replaceChildren();
+  if (history.length < 2) {
+    const d = document.createElement("div"); d.className = "empty";
+    d.textContent = "Connect to Bloop and the line appears after a few choices.";
+    box.appendChild(d); return;
+  }
+  const W = 640, H = 260, m = { l: 44, r: 12, t: 12, b: 30 };
+  const win = 25;
+  const pts = history.map((h, i) => {
+    const a = Math.max(0, i - win + 1);
+    let sum = 0; for (let k = a; k <= i; k++) sum += history[k].r;
+    return { n: h.n, avg: sum / (i - a + 1), r: h.r, a: h.a, s: h.s };
+  });
+  const xs = pts.map(p => p.n);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  let y0 = Math.min(0, ...pts.map(p => p.avg)), y1 = Math.max(0, ...pts.map(p => p.avg));
+  const pad = (y1 - y0) * 0.1 || 0.5; y0 -= pad; y1 += pad;
+  const X = v => m.l + (x1 === x0 ? 0 : (v - x0) / (x1 - x0)) * (W - m.l - m.r);
+  const Y = v => m.t + (1 - (v - y0) / (y1 - y0)) * (H - m.t - m.b);
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Average reward over the last 25 choices" }, box);
+  const css = getComputedStyle(document.documentElement);
+  const c = n => css.getPropertyValue(n).trim();
+  for (const t of niceTicks(y0, y1, 4)) {
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), stroke: t === 0 ? c("--axis") : c("--grid"), "stroke-width": 1 }, svg);
+    const tx = el("text", { x: m.l - 6, y: Y(t) + 4, "text-anchor": "end", "font-size": 11, fill: c("--muted") }, svg);
+    tx.textContent = t;
+  }
+  for (const t of niceTicks(x0, x1, 5)) {
+    const tx = el("text", { x: X(t), y: H - 10, "text-anchor": "middle", "font-size": 11, fill: c("--muted") }, svg);
+    tx.textContent = t;
+  }
+  const xl = el("text", { x: W - m.r, y: H - 10, "text-anchor": "end", "font-size": 11, fill: c("--muted") }, svg);
+  xl.textContent = "";
+  let d = "";
+  pts.forEach((p, i) => { d += (i ? "L" : "M") + X(p.n).toFixed(1) + "," + Y(p.avg).toFixed(1); });
+  el("path", { d, fill: "none", stroke: c("--series-1"), "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+  const lastP = pts[pts.length - 1];
+  el("circle", { cx: X(lastP.n), cy: Y(lastP.avg), r: 4, fill: c("--series-1"), stroke: c("--surface"), "stroke-width": 2 }, svg);
+  const lab = el("text", { x: Math.min(X(lastP.n), W - m.r) - 6, y: Y(lastP.avg) - 9, "text-anchor": "end", "font-size": 12, "font-weight": 600, fill: c("--ink") }, svg);
+  lab.textContent = lastP.avg.toFixed(2);
+
+  // crosshair
+  const cross = el("line", { y1: m.t, y2: H - m.b, stroke: c("--axis"), "stroke-width": 1, visibility: "hidden" }, svg);
+  const mark = el("circle", { r: 4, fill: c("--series-1"), stroke: c("--surface"), "stroke-width": 2, visibility: "hidden" }, svg);
+  const hit = el("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, fill: "transparent" }, svg);
+  hit.addEventListener("pointermove", e => {
+    const r = svg.getBoundingClientRect();
+    const vx = (e.clientX - r.left) / r.width * W;
+    let best = pts[0];
+    for (const p of pts) if (Math.abs(X(p.n) - vx) < Math.abs(X(best.n) - vx)) best = p;
+    cross.setAttribute("x1", X(best.n)); cross.setAttribute("x2", X(best.n)); cross.setAttribute("visibility", "visible");
+    mark.setAttribute("cx", X(best.n)); mark.setAttribute("cy", Y(best.avg)); mark.setAttribute("visibility", "visible");
+    showTip(e, [best.avg.toFixed(2) + " average reward", "Choice #" + best.n + ": " + ACTIONS[best.a], "That choice's reward: " + best.r.toFixed(2)]);
+  });
+  hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); mark.setAttribute("visibility", "hidden"); hideTip(); });
+}
+
+// ---------- panels ----------
+function setText(id, v) { document.getElementById(id).textContent = v; }
+
+function drawNow() {
+  if (!last) return;
+  setText("tDecisions", last.n.toLocaleString());
+  setText("tLevel", Math.floor(last.n / 40) + 1);
+  setText("tEps", Math.round(last.eps * 100) + "%");
+  setText("tFalls", last.falls);
+  setText("tSnacks", last.snacks);
+  setText("tKicks", last.kicks);
+  setText("nowText", "Doing: " + ACTIONS[last.a] + (last.x ? " (trying something random)" : "") + ". Feeling " + describe(last.s) + ".");
+  const box = document.getElementById("meters");
+  box.replaceChildren();
+  [["Full", 100 - last.hun], ["Energy", last.ene], ["Joy", last.joy], ["Health", last.hp]].forEach(([name, v]) => {
+    const row = document.createElement("div"); row.className = "meter";
+    const a = document.createElement("span"); a.textContent = name;
+    const tr = document.createElement("div"); tr.className = "track";
+    const f = document.createElement("div"); f.className = "fill"; f.style.width = Math.max(0, Math.min(100, v)) + "%";
+    tr.appendChild(f);
+    const n = document.createElement("span"); n.className = "num"; n.textContent = Math.round(v);
+    row.append(a, tr, n); box.appendChild(row);
+  });
+}
+
+function drawMix() {
+  const box = document.getElementById("mix");
+  box.replaceChildren();
+  const recent = history.slice(-100);
+  if (!recent.length) { const d = document.createElement("div"); d.className = "empty"; d.textContent = "No choices yet."; box.appendChild(d); return; }
+  const counts = ACTIONS.map(() => 0);
+  recent.forEach(h => counts[h.a]++);
+  const max = Math.max(...counts, 1);
+  ACTIONS.map((name, i) => ({ name, n: counts[i] })).sort((a, b) => b.n - a.n).forEach(({ name, n }) => {
+    const row = document.createElement("div"); row.className = "bar-row";
+    const a = document.createElement("span"); a.textContent = name;
+    const tr = document.createElement("div"); tr.className = "track";
+    const f = document.createElement("div"); f.className = "fill"; f.style.width = (n / max * 100) + "%";
+    if (n === 0) f.style.display = "none";
+    tr.appendChild(f);
+    tr.addEventListener("pointermove", e => showTip(e, [n + " of last " + recent.length, name]));
+    tr.addEventListener("pointerleave", hideTip);
+    const c = document.createElement("span"); c.className = "num"; c.textContent = n;
+    row.append(a, tr, c); box.appendChild(row);
+  });
+}
+
+function habit(filter) {
+  const sum = ACTIONS.map(() => 0); let count = 0;
+  for (let s = 0; s < NUM_STATES; s++) {
+    if (!filter(decode(s))) continue;
+    for (let a = 0; a < ACTIONS.length; a++) sum[a] += q[s * 8 + a];
+    count++;
+  }
+  let b = 0; for (let a = 1; a < ACTIONS.length; a++) if (sum[a] > sum[b]) b = a;
+  return { a: b, score: count ? sum[b] / count : 0 };
+}
+
+function drawHabits() {
+  const ul = document.getElementById("habits");
+  ul.replaceChildren();
+  const rows = [
+    ["When the room tilts", s => s.room === 1],
+    ["Hungry, food is out", s => s.hungry && s.food && s.room === 0],
+    ["Tired", s => s.tired && !s.hungry && s.room === 0],
+    ["Ball nearby, feeling fine", s => s.ball && !s.tired && !s.hungry && s.room === 0],
+    ["You're there", s => s.attention && !s.tired && !s.hungry && s.room === 0],
+    ["In zero-g", s => s.room === 2],
+  ];
+  rows.forEach(([when, f]) => {
+    const li = document.createElement("li");
+    const a = document.createElement("span"); a.textContent = when;
+    const b = document.createElement("span"); b.className = "act";
+    if (!q) { b.textContent = "–"; b.classList.add("none"); }
+    else {
+      const h = habit(f);
+      if (Math.abs(h.score) < 0.05) { b.textContent = "not learned yet"; b.classList.add("none"); }
+      else b.textContent = ACTIONS[h.a];
+    }
+    li.append(a, b); ul.appendChild(li);
+  });
+}
+
+function mix(c1, c2, t) {
+  const p = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const a = p(c1), b = p(c2);
+  return "rgb(" + a.map((v, i) => Math.round(v + (b[i] - v) * t)).join(",") + ")";
+}
+
+function drawHeat() {
+  if (!q) return;
+  const css = getComputedStyle(document.documentElement);
+  const pos = css.getPropertyValue("--div-pos").trim(), neg = css.getPropertyValue("--div-neg").trim(), mid = css.getPropertyValue("--div-mid").trim();
+  let span = 0.5; for (const v of q) span = Math.max(span, Math.abs(v));
+  const wrap = document.getElementById("heatWrap");
+  const keepScroll = wrap.scrollTop;
+  const table = document.createElement("table"); table.className = "heat";
+  const head = document.createElement("tr");
+  const th0 = document.createElement("th"); th0.textContent = "Situation"; head.appendChild(th0);
+  ACTIONS.forEach(a => { const th = document.createElement("th"); th.textContent = a; head.appendChild(th); });
+  const thead = document.createElement("thead"); thead.appendChild(head); table.appendChild(thead);
+  const tb = document.createElement("tbody");
+  let nowRow = null;
+  for (let s = 0; s < NUM_STATES; s++) {
+    const tr = document.createElement("tr");
+    if (last && last.s === s) { tr.className = "now"; nowRow = tr; }
+    const lab = document.createElement("td"); lab.className = "lab"; lab.textContent = shortLabel(s);
+    lab.title = describe(s);
+    tr.appendChild(lab);
+    for (let a = 0; a < 8; a++) {
+      const v = q[s * 8 + a];
+      const td = document.createElement("td"); td.className = "cell";
+      const t = Math.min(1, Math.abs(v) / span);
+      td.style.background = v >= 0 ? mix(mid, pos, t) : mix(mid, neg, t);
+      td.addEventListener("pointermove", e => showTip(e, [(v >= 0 ? "+" : "") + v.toFixed(2), ACTIONS[a], describe(s)]));
+      td.addEventListener("pointerleave", hideTip);
+      tr.appendChild(td);
+    }
+    tb.appendChild(tr);
+  }
+  table.appendChild(tb);
+  wrap.replaceChildren(table);
+  wrap.scrollTop = keepScroll;
+}
+
+function drawRecent() {
+  const tb = document.getElementById("recent");
+  tb.replaceChildren();
+  history.slice(-15).reverse().forEach(h => {
+    const tr = document.createElement("tr");
+    [h.n, describe(h.s), ACTIONS[h.a] + (h.x ? " (random)" : ""), h.r.toFixed(2)].forEach((v, i) => {
+      const td = document.createElement("td"); td.textContent = v;
+      if (i === 0 || i === 3) td.className = "n";
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+}
+
+const EVENT_TEXT = {
+  fall: v => ["Hard landing", "bad", "hurt " + v.toFixed(1)],
+  shake: v => ["Room shaken", "bad", ""],
+  eat: v => ["Ate a snack", v > 55 ? "good" : (v < 20 ? "bad" : ""), v > 55 ? "was hungry" : (v < 20 ? "wasn't hungry: tummy ache" : "")],
+  kick: v => ["Kicked the ball", "good", ""],
+  good: v => ["You said GOOD", "good", ""],
+  no: v => ["You said NO", "bad", ""],
+};
+function drawLog() {
+  const ul = document.getElementById("log");
+  ul.replaceChildren();
+  if (!events.length) { const li = document.createElement("li"); li.className = "empty"; li.style.display = "block"; li.textContent = "Nothing yet."; ul.appendChild(li); return; }
+  events.slice(-40).reverse().forEach(ev => {
+    const f = EVENT_TEXT[ev.e]; if (!f) return;
+    const [text, kind, extra] = f(ev.v);
+    const li = document.createElement("li");
+    const t = document.createElement("span"); t.className = "t"; t.textContent = ev.time;
+    const g = document.createElement("span"); g.className = "tag" + (kind ? " " + kind : ""); g.textContent = text;
+    li.append(t, g);
+    if (extra) { const x = document.createElement("span"); x.style.color = "var(--ink-2)"; x.textContent = extra; li.appendChild(x); }
+    ul.appendChild(li);
+  });
+}
+
+function redrawAll() { drawRewardChart(); drawNow(); drawMix(); drawHabits(); drawHeat(); drawRecent(); drawLog(); }
+
+// ---------- data in ----------
+let drawQueued = false;
+function queueDraw() {
+  if (drawQueued) return;
+  drawQueued = true;
+  requestAnimationFrame(() => { drawQueued = false; redrawAll(); });
+}
+
+function handleLine(line) {
+  line = line.trim();
+  if (!line.startsWith("{")) return;
+  let m; try { m = JSON.parse(line); } catch (e) { return; }
+  if (m.t === "d") {
+    last = m;
+    // A fresh brain (or a reset) restarts the count: start a new history.
+    if (history.length && m.n < history[history.length - 1].n - 5) history = [];
+    history.push({ n: m.n, s: m.s, a: m.a, r: m.r, x: m.x });
+    if (history.length > 3000) history = history.slice(-3000);
+    if (history.length % 10 === 0) saveHistory();
+  } else if (m.t === "q" && Array.isArray(m.q) && m.q.length === NUM_STATES * 8) {
+    q = m.q;
+  } else if (m.t === "ev") {
+    events.push({ e: m.e, v: m.v, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) });
+    if (events.length > 200) events = events.slice(-200);
+  }
+  queueDraw();
+}
+
+// ---------- Web Serial ----------
+const connectBtn = document.getElementById("connectBtn");
+let port = null, reading = false;
+
+function setConnected(on, text) {
+  document.getElementById("dot").classList.toggle("on", on);
+  setText("statusText", text);
+  connectBtn.textContent = on ? "Disconnect" : "Connect to Bloop";
+  document.querySelectorAll(".cmd").forEach(b => b.disabled = !on);
+}
+
+async function connect() {
+  if (port) { await disconnect(); return; }
+  try {
+    port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x303a }] });
+    await port.open({ baudRate: 115200 });
+    try { await port.setSignals({ dataTerminalReady: true, requestToSend: false }); } catch (e) {}
+    const enc = new TextEncoderStream();
+    enc.readable.pipeTo(port.writable).catch(() => {});
+    writer = enc.writable.getWriter();
+    setConnected(true, "Connected: listening");
+    send("brain");
+    readLoop();
+  } catch (e) {
+    port = null;
+    setConnected(false, e && e.name === "NotFoundError" ? "Not connected" : "Couldn't connect: " + (e.message || e));
+  }
+}
+
+async function readLoop() {
+  reading = true;
+  const dec = new TextDecoderStream();
+  const done = port.readable.pipeTo(dec.writable).catch(() => {});
+  const reader = dec.readable.getReader();
+  let buf = "";
+  try {
+    while (reading) {
+      const { value, done: end } = await reader.read();
+      if (end) break;
+      buf += value;
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) { handleLine(buf.slice(0, i)); buf = buf.slice(i + 1); }
+      if (buf.length > 20000) buf = "";
+    }
+  } catch (e) {}
+  try { reader.releaseLock(); } catch (e) {}
+  await done;
+  if (reading) { reading = false; port = null; writer = null; setConnected(false, "Disconnected (unplugged?)"); }
+}
+
+async function disconnect() {
+  reading = false;
+  const p = port; port = null;
+  try { if (writer) { await writer.close(); } } catch (e) {}
+  writer = null;
+  try { await p.close(); } catch (e) {}
+  setConnected(false, "Not connected");
+}
+
+async function send(cmd) {
+  if (!writer) return;
+  try { await writer.write(cmd + "\n"); } catch (e) {}
+}
+
+if (!("serial" in navigator)) {
+  document.getElementById("noSerial").hidden = false;
+  connectBtn.disabled = true;
+}
+connectBtn.addEventListener("click", connect);
+document.querySelectorAll(".cmd").forEach(b => b.addEventListener("click", () => send(b.dataset.cmd)));
+document.getElementById("clearBtn").addEventListener("click", () => { history = []; saveHistory(); redrawAll(); });
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redrawAll);
+window.addEventListener("resize", () => queueDraw());
+
+fetch("manifest.json").then(r => r.json()).then(m => {
+  if (m.version) setText("buildInfo", "Firmware build " + m.version);
+}).catch(() => {});
+
+redrawAll();
+</script>
+</body>
+</html>

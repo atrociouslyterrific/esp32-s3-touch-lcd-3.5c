@@ -1,13 +1,28 @@
 # ESP32-S3-Touch-LCD-3.5-C projects
 
-[![Compile sketches](https://github.com/atrociouslyterrific/esp32-s3-touch-lcd-3.5c/actions/workflows/compile.yml/badge.svg)](https://github.com/atrociouslyterrific/esp32-s3-touch-lcd-3.5c/actions/workflows/compile.yml)
+[![Compile sketches](https://github.com/atrociouslyterrific/esp32-s3-touch-lcd-3.5c/actions/workflows/build.yml/badge.svg)](https://github.com/atrociouslyterrific/esp32-s3-touch-lcd-3.5c/actions/workflows/build.yml)
 
 Arduino sketches for the Waveshare **ESP32-S3-Touch-LCD-3.5-C**: an ESP32-S3 (16 MB flash, 8 MB PSRAM) with a 3.5" 320×480 IPS screen and capacitive touch. The -C version also comes with an OV5640 camera.
+
+## Bloop's Room
+
+**Website: https://atrociouslyterrific.github.io/esp32-s3-touch-lcd-3.5c/**
+
+Bloop is a pet that lives in a room you can tip over, and it learns by itself.
+
+- **Real gravity.** The board's motion sensor decides which way is down. Tip the board and the floor changes: Bloop, its ball, food and bed slide and fall. Hard landings hurt. Shake it and everything flies (and Bloop gets dizzy). Lay the board flat and the room goes zero-g.
+- **A brain that learns on the board.** Bloop starts as a clueless baby. Every couple of seconds it picks one of 8 actions (wander, chase ball, eat, sleep, grip the wall, curl up, come to you, sit) and learns from what happens (Q-learning). Over time it works out habits, like gripping the wall or curling up when the room starts to tilt.
+- **You train it.** Hold a finger on Bloop to pet it, or tap **GOOD** / **NO** to reward or scold what it's doing. Drag Bloop or the ball to throw them. **FEED** drops a snack, **BALL** tosses the ball in, **BRAIN** shows what it has learned.
+- **It remembers.** Its brain and stats are saved on the board.
+- **First start:** a 2-step tilt setup teaches it which way the board is facing. You can redo it from the BRAIN screen.
+
+**Install it and watch it learn from the website.** In Chrome or Edge on a computer, open the website and click **Install Bloop**, then **Connect to Bloop**. The page shows its reward going up over time, every choice, its habits, and its whole brain as a heatmap. GitHub builds the firmware from this repo on every push, so nothing needs compiling on your computer. Updating keeps what Bloop has learned.
 
 ## Sketches
 
 | Folder | What it does |
 |---|---|
+| `bloop_room` | Bloop's Room (above). |
 | `hello_touch` | Screen and touch test. Shows a title and color bars, prints the touch position, and lets you draw with your finger. Tap a swatch to change the pen color, or **CLEAR** to wipe the screen. |
 
 ## Hardware

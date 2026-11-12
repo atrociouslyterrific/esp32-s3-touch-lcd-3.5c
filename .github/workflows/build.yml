@@ -1,0 +1,87 @@
+name: Build and publish
+
+# Every push: GitHub compiles the sketches. Pushes to main also publish the
+# dashboard website (GitHub Pages) with ready-to-install Bloop firmware.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FQBN: esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,FlashMode=qio,PartitionScheme=app3M_fat9M_16MB,CDCOnBoot=cdc
+  ESP32_URL: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Install the ESP32 board package and libraries
+        run: |
+          arduino-cli core update-index --additional-urls "$ESP32_URL"
+          arduino-cli core install esp32:esp32@3.3.12 --additional-urls "$ESP32_URL"
+          arduino-cli lib install "GFX Library for Arduino@1.6.9" "SensorLib@0.3.1" "TCA9554@0.1.2"
+
+      - name: Compile the sketches
+        run: |
+          for sketch in hello_touch bloop_room; do
+            echo "::group::$sketch"
+            arduino-cli compile --fqbn "$FQBN" --warnings default --output-dir "build/$sketch" "$sketch"
+            echo "::endgroup::"
+          done
+          ls -la build/*
+
+      - name: Put the website and firmware together
+        run: |
+          mkdir -p _site/firmware
+          cp -r site/. _site/
+          B=build/bloop_room
+          cp "$B/bloop_room.ino.bootloader.bin" _site/firmware/bootloader.bin
+          cp "$B/bloop_room.ino.partitions.bin" _site/firmware/partitions.bin
+          cp "$B/bloop_room.ino.bin"            _site/firmware/bloop_room.bin
+          cp "$(find ~/.arduino15/packages/esp32/hardware/esp32 -name boot_app0.bin | head -1)" _site/firmware/boot_app0.bin
+          # Separate parts (not one merged file) so updating never wipes Bloop's saved brain.
+          cat > _site/manifest.json <<JSON
+          {
+            "name": "Bloop's Room",
+            "version": "${GITHUB_SHA::7}",
+            "new_install_prompt_erase": false,
+            "builds": [{
+              "chipFamily": "ESP32-S3",
+              "parts": [
+                { "path": "firmware/bootloader.bin", "offset": 0 },
+                { "path": "firmware/partitions.bin", "offset": 32768 },
+                { "path": "firmware/boot_app0.bin",  "offset": 57344 },
+                { "path": "firmware/bloop_room.bin", "offset": 65536 }
+              ]
+            }]
+          }
+          JSON
+          cat _site/manifest.json
+          ls -la _site _site/firmware
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
