@@ -406,6 +406,8 @@ void hurt(float dmg) {
   say(SAY_FALL, true);
 }
 
+void visitorShake();   // in visitor.h (included below)
+
 void onShake() {
   Body *all[3] = {&ball, &bed, &pet.body};
   for (int i = 0; i < 3; i++) {
