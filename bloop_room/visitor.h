@@ -28,7 +28,7 @@ struct __attribute__((packed)) PalMsg {
   uint8_t who;        // PAL_PIP or PAL_BLOOP
   uint8_t action;     // what the sender is doing (its own action number)
   uint8_t flags;      // PALF_* bits about the sender
-  uint8_t hosting;    // Bloop: 1 while Pip is in Bloop's room
+  uint8_t hosting;    // Bloop: 0 = apart, 1 = both pets are in Bloop's room, 2 = both are in Pip's room
 };
 enum : uint8_t { PAL_PIP = 1, PAL_BLOOP = 2 };
 
@@ -64,6 +64,15 @@ struct Visitor {
   uint32_t lessons;         // how many times Pip has praised or scolded this visit
 };
 Visitor pip;
+
+// While the boards are together the two pets share ONE room at a time: a pet that
+// leaves its own room turns up in the other's. They start in Bloop's room, then
+// take turns: Bloop goes over to Pip's (and this screen shows its room empty),
+// later they both come back here.
+enum : uint8_t { PLACE_BLOOPS = 1, PLACE_PIPS = 2 };
+uint8_t palPlace = PLACE_BLOOPS;
+float placeT = 0;   // seconds until they move to the other room
+bool visitorBloopAway() { return pip.here && palPlace == PLACE_PIPS; }
 
 // Written by the radio (in the Wi-Fi task), read by the game loop.
 volatile uint32_t palHeardMs = 0;
@@ -102,7 +111,7 @@ void palOnRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
 
 void palSend(bool hosting) {
   uint8_t flags = (pet.asleep ? PALF_ASLEEP : 0) | ((pet.joy < 25 || pet.sadT > 0 || pet.hurtT > 0) ? PALF_SAD : 0);
-  PalMsg m = {{'P', 'A', 'L', '1'}, PAL_BLOOP, (uint8_t)pet.action, flags, (uint8_t)(hosting ? 1 : 0)};
+  PalMsg m = {{'P', 'A', 'L', '1'}, PAL_BLOOP, (uint8_t)pet.action, flags, (uint8_t)(hosting ? palPlace : 0)};
   esp_now_send(PAL_EVERYONE, (const uint8_t *)&m, sizeof(m));
 }
 
@@ -203,6 +212,8 @@ void visitorArrive() {
   bodyInit(pip.body, BODY_BALL, p.x, p.y, 17, 0.35f, 6);
   pip.body.stick = 0.2f;
   pip.here = true;
+  palPlace = PLACE_BLOOPS;
+  placeT = frand(50, 75);
   pip.hopCool = 1.5f;
   pip.heartCool = 2.0f;
   pip.bubble = "Hi Bloop!";
@@ -226,8 +237,9 @@ void visitorArrive() {
 }
 
 void visitorLeave() {
-  visitorPuff();
+  if (palPlace == PLACE_BLOOPS) visitorPuff();
   pip.here = false;
+  palPlace = PLACE_BLOOPS;   // Bloop is back in its own room
   for (int i = 0; i < 3; i++) palSend(false);
   lastSayMs = 0;
   say(SAY_BYE, true);
@@ -287,7 +299,8 @@ void visitorRadio(float dt) {
 // time spent with Pip teaches a young Bloop sensible habits much faster.
 //
 // What Pip thinks is sensible: hold on, curl up or hide when the room tips; eat
-// when hungry (and beg if there's no food); sleep when tired; play with the toy
+// when hungry (and beg if there's no food); sleep when tired; play, dance or
+// come over when all is well (not nap or hide for no reason); play with the toy
 // when all is well. Silly: dancing or napping while the room tips, ignoring food
 // when hungry, eating or begging when full. Anything else, Pip keeps quiet.
 // Returns +1 (good), -1 (no) or 0 (no opinion).
@@ -297,14 +310,23 @@ int pipOpinion(const Senses &s, Action a) {
     if (a == ACT_DANCE || a == ACT_JUMP || a == ACT_SLEEP || a == ACT_WINDOW) return -1;
     return 0;
   }
-  if (s.room == ROOM_FLOATING) return 0;   // zero-g: Pip is as confused as Bloop
+  // The rest holds whether the room is steady or the board is lying flat (zero-g),
+  // which is how it usually sits on a desk.
   if (s.hungry) {
     if (s.foodOut) return a == ACT_EAT ? 1 : -1;
     return a == ACT_BEG ? 1 : 0;
   }
   if (a == ACT_EAT || a == ACT_BEG) return -1;   // not hungry: greedy!
-  if (s.tired) return a == ACT_SLEEP ? 1 : ((a == ACT_DANCE || a == ACT_JUMP) ? -1 : 0);
-  if (s.ballNear && a == ACT_BALL) return 1;
+  if (s.tired) {
+    if (a == ACT_SLEEP) return 1;
+    if (a == ACT_DANCE || a == ACT_JUMP || a == ACT_ROLL || a == ACT_BALL) return -1;   // rest, silly!
+    return 0;
+  }
+  // Fed and rested: time to play.
+  if (a == ACT_BALL && s.ballNear) return 1;
+  if (a == ACT_DANCE) return 1;
+  if (a == ACT_COME && s.attention) return 1;
+  if (a == ACT_SLEEP || a == ACT_HIDE) return -1;   // nothing to sleep off or hide from
   return 0;
 }
 
@@ -341,10 +363,51 @@ void visitorCoach(float dt) {
   sendEvent(verdict > 0 ? "pip_good" : "pip_no", verdict * PIP_PRAISE);
 }
 
+void bloopPuff() {
+  for (int k = 0; k < 8; k++)
+    spawnParticle(PT_STAR, pet.body.x + frand(-22, 22), pet.body.y + frand(-22, 22),
+                  frand(-70, 70), frand(-70, 70), 0.7f, RGB565_YELLOW);
+}
+
+// Time to move to the other room?
+void visitorTakeTurns(float dt) {
+  placeT -= dt;
+  if (placeT > 0) return;
+  if (palPlace == PLACE_BLOOPS) {
+    // Off to Pip's. (Not while Bloop is asleep or in your hand.)
+    if (pet.asleep || pet.held) { placeT = 10; return; }
+    visitorPuff();
+    bloopPuff();
+    palPlace = PLACE_PIPS;
+    placeT = frand(40, 60);
+    sendEvent("to_pips_room", 0);
+  } else {
+    // Back to Bloop's: Bloop pops up where it was, Pip drops in again.
+    palPlace = PLACE_BLOOPS;
+    placeT = frand(50, 75);
+    Vec2 p = ceilingSpot();
+    bodyInit(pip.body, BODY_BALL, p.x, p.y, 17, 0.35f, 6);
+    pip.body.stick = 0.2f;
+    pip.hopCool = 1.5f;
+    pip.seenDecisions = brain.decisions;
+    pip.coachT = -1;
+    pip.coachCool = 3.0f;
+    visitorPuff();
+    bloopPuff();
+    sendEvent("to_bloops_room", 0);
+  }
+  palSend(true);
+}
+
 // Once a frame: the radio, and what Pip gets up to in the room.
 void visitorUpdate(float dt) {
   visitorRadio(dt);
   if (!pip.here) return;
+  visitorTakeTurns(dt);
+  if (palPlace == PLACE_PIPS) {   // both are over at Pip's: only the chatting carries on here
+    visitorTalk(dt);
+    return;
+  }
   Body &b = pip.body;
   pip.hopCool -= dt;
   pip.heartCool -= dt;
@@ -384,7 +447,7 @@ void visitorUpdate(float dt) {
 
 // One physics step for Pip: fall, then bump into everything else.
 void visitorStep(Vec2 g, float h) {
-  if (!pip.here) return;
+  if (!pip.here || palPlace == PLACE_PIPS) return;
   Body &b = pip.body;
   stepBody(b, g, h, floating);
   if (!pet.held && !pet.gripping) collide(pet.body, b, 3.0f, 2.0f);
@@ -395,7 +458,7 @@ void visitorStep(Vec2 g, float h) {
 }
 
 void visitorShake() {
-  if (!pip.here) return;
+  if (!pip.here || palPlace == PLACE_PIPS) return;
   pip.body.vx += frand(-420, 420);
   pip.body.vy += frand(-420, 420);
   pip.bubble = "Whoa!";
@@ -406,6 +469,21 @@ void visitorShake() {
 // black outline and a little tip on top. Its feet point at the floor, like Bloop's.
 void drawVisitor() {
   if (!pip.here) return;
+  if (palPlace == PLACE_PIPS) {   // nobody home: a note on the wall
+    const uint16_t ink = rgb(30, 28, 40);
+    int w = 236, h = 62, x = (SCREEN_W - w) / 2, y = (int)(ROOM_T + ROOM_B) / 2 - h / 2;
+    cv->fillRoundRect(x, y, w, h, 10, RGB565_WHITE);
+    cv->drawRoundRect(x, y, w, h, 10, ink);
+    cv->setFont((const GFXfont *)NULL);
+    cv->setTextSize(2);
+    cv->setTextColor(ink);
+    cv->setCursor(x + 16, y + 12);
+    cv->print("Bloop is over at");
+    cv->setCursor(x + 40, y + 36);
+    cv->print("Pip's room...");
+    cv->setTextSize(1);
+    return;
+  }
   Body &b = pip.body;
   Vec2 d = downDir();
   Vec2 r = v2(d.y, -d.x);

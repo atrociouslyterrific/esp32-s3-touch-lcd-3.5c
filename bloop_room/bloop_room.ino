@@ -764,6 +764,8 @@ void holdAtFinger(Body &b) {
 }
 
 void updateWorld(float dt) {
+  // Bloop is out at Pip's room (see visitor.h): its own room waits, just as it left it.
+  if (visitorBloopAway()) { visitorUpdate(dt); return; }
   // A snack you're holding can get eaten (hand-feeding!) or cleaned up.
   if (grabCand == GRAB_FOOD && (grabFood < 0 || !food[grabFood].active)) {
     grabCand = GRAB_NONE;
@@ -1207,9 +1209,11 @@ void drawRoom() {
 
   drawToy();
 
-  drawShadow();
-  drawBloop();
-  if (pet.asleep && nearBed(12)) drawBlanketOverBloop();
+  if (!visitorBloopAway()) {   // Bloop isn't drawn while it's over at Pip's
+    drawShadow();
+    drawBloop();
+    if (pet.asleep && nearBed(12)) drawBlanketOverBloop();
+  }
   drawVisitor();
 
   // Particles
@@ -1247,7 +1251,7 @@ void drawRoom() {
   }
 
   // Speech / thought bubble
-  if (!pet.asleep && (sayT > 0 || pet.bubbleT > 0)) {
+  if (!pet.asleep && !visitorBloopAway() && (sayT > 0 || pet.bubbleT > 0)) {
     char txt[64];
     if (sayT > 0) snprintf(txt, sizeof(txt), "%s", sayText);
     else snprintf(txt, sizeof(txt), "%s%s", ACTION_THOUGHTS[pet.action], brain.lastWasExplore ? "?" : "");
