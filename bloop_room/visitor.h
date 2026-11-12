@@ -379,6 +379,7 @@ struct __attribute__((packed)) PalAsk {
   uint8_t bits;       // 1 hungry, 2 tired, 4 ball near, 8 food out, 16 you're here
   uint8_t room;       // RoomFeel: 0 calm, 1 tilting, 2 floating
 };
+uint32_t pipLessonsTotal = 0;   // every "Good Bloop!" / "No, Bloop!" since the board was switched on
 PalAsk coachAsk;
 Senses coachSenses;
 float coachWait = -1;         // seconds left to wait for Pip's answer (-1 = not waiting)
@@ -388,8 +389,9 @@ char coachLine[24] = "";
 // Pip's verdict lands: reward or scold what Bloop is doing right now.
 void visitorVerdict(int verdict, float strength, const char *text) {
   if (verdict == 0) return;
-  pip.coachCool = frand(3.0f, 6.0f);
+  pip.coachCool = frand(2.0f, 4.0f);
   pip.lessons++;
+  pipLessonsTotal++;
   float amount = verdict * PIP_PRAISE * strength;
   rewardAcc += amount;   // credited to what Bloop is doing right now
   if (text && text[0]) {
@@ -430,7 +432,10 @@ void visitorCoach(float dt) {
       palVerdictFresh = false;
       if (ours) {
         coachWait = -1;
-        visitorVerdict(v > 0 ? 1 : (v < 0 ? -1 : 0), strength, text);
+        if (v != 0) visitorVerdict(v > 0 ? 1 : -1, strength, text);
+        // Pip itself has no strong feelings about this one: it still teaches the
+        // basics (eat when hungry, sleep when tired...), just more gently.
+        else if (!(pip.flags & PALF_ASLEEP)) visitorVerdict(pipOpinion(coachSenses, pet.action), 0.6f, nullptr);
         return;
       }
     }
@@ -619,6 +624,22 @@ void drawVisitor() {
     line(look - 5, 9, look - 2, 7, ink); line(look - 2, 7, look + 2, 7, ink); line(look + 2, 7, look + 5, 9, ink);
   } else {
     line(look - 5, 5, look - 2, 7, ink); line(look - 2, 7, look + 2, 7, ink); line(look + 2, 7, look + 5, 5, ink);
+  }
+
+  // So you can see the teaching happen: a line along the bottom of the room.
+  {
+    char note[40];
+    if (asleep) snprintf(note, sizeof(note), "Pip is napping: no lessons");
+    else snprintf(note, sizeof(note), "Pip is teaching Bloop: %lu", (unsigned long)pipLessonsTotal);
+    cv->setFont((const GFXfont *)NULL);
+    cv->setTextSize(1);
+    int nx = SCREEN_W / 2 - (int)strlen(note) * 3, ny = (int)ROOM_B - 10;
+    cv->setTextColor(rgb(20, 18, 30));
+    cv->setCursor(nx + 1, ny + 1);
+    cv->print(note);
+    cv->setTextColor(RGB565_WHITE);
+    cv->setCursor(nx, ny);
+    cv->print(note);
   }
 
   if (pip.bubbleT > 0 && pip.bubble) drawBubbleAt(b.x, b.y, b.r, pip.bubble, rgb(250, 248, 240));
