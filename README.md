@@ -23,9 +23,9 @@ These pins come from [Waveshare's official examples](https://github.com/waveshar
 
 ## Arduino IDE setup
 
-1. Install the **esp32** board package by Espressif (version 3.3.x).
+1. Install the **esp32** board package by Espressif (version 3.3.6 or newer).
 2. Install these libraries with the Library Manager:
-   - **GFX Library for Arduino** by Moon On Our Nation (tested with 1.5.5)
+   - **GFX Library for Arduino** by Moon On Our Nation (1.6.9 or newer; older versions do not build with ESP32 core 3.3.6+)
    - **SensorLib** by Lewis He (tested with 0.3.1)
    - **TCA9554** by Rob Tillaart (tested with 0.1.2)
 3. Choose these settings in the **Tools** menu:

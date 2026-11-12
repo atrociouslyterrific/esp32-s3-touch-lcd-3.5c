@@ -20,7 +20,7 @@ jobs:
               version: 3.3.12
           libraries: |
             - name: GFX Library for Arduino
-              version: 1.5.5
+              version: 1.6.9
             - name: SensorLib
               version: 0.3.1
             - name: TCA9554
