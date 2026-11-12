@@ -302,13 +302,28 @@ def main():
     version, total_steps, old = 0, 0, None
     if os.path.exists(CKPT_IN) and os.environ.get("BLOOP_VOICE_FRESH") != "1":
         ck = torch.load(CKPT_IN, map_location="cpu")
-        if ck.get("vocab") == VOCAB and ck.get("shape") == [D, H, L, T]:
-            model.load_state_dict(ck["model"])
+        if ck.get("shape") == [D, H, L, T]:
+            if ck.get("vocab") == VOCAB:
+                model.load_state_dict(ck["model"])
+            else:
+                # New words were added (or some removed): keep everything learned, and copy each
+                # known word's embedding to its new place. New words start from small random values.
+                sd = dict(ck["model"])
+                old_tok, new_tok = sd.pop("tok.weight"), model.tok.weight.detach().clone()
+                where = {w: i for i, w in enumerate(ck["vocab"])}
+                kept_words = 0
+                for i, w in enumerate(VOCAB):
+                    if w in where:
+                        new_tok[i] = old_tok[where[w]]
+                        kept_words += 1
+                sd["tok.weight"] = new_tok
+                model.load_state_dict(sd)
+                print(f"vocabulary changed: {len(ck['vocab'])} -> {V} words, {kept_words} carried over")
             version, total_steps = ck.get("version", 1), ck.get("total_steps", 0)
             old = test_loss(model, evalb)
             print(f"continuing from voice v{version} ({total_steps} steps so far), test loss {old:.4f}")
         else:
-            print("the saved voice has different words or size - starting fresh")
+            print("the saved voice is a different size - starting fresh")
     resumed = old is not None
     old_state = {k: v.clone() for k, v in model.state_dict().items()} if resumed else None
 
