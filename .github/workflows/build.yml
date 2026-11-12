@@ -102,10 +102,10 @@ jobs:
             "builds": [{
               "chipFamily": "ESP32-S3",
               "parts": [
-                { "path": "firmware/$3-bootloader.bin", "offset": 0 },
-                { "path": "firmware/$3-partitions.bin", "offset": 32768 },
-                { "path": "firmware/boot_app0.bin",  "offset": 57344 },
-                { "path": "firmware/$3.bin", "offset": 65536 }
+                { "path": "firmware/$3-bootloader.bin?v=${GITHUB_SHA::7}", "offset": 0 },
+                { "path": "firmware/$3-partitions.bin?v=${GITHUB_SHA::7}", "offset": 32768 },
+                { "path": "firmware/boot_app0.bin?v=${GITHUB_SHA::7}",  "offset": 57344 },
+                { "path": "firmware/$3.bin?v=${GITHUB_SHA::7}", "offset": 65536 }
               ]
             }]
           }
@@ -113,6 +113,11 @@ jobs:
           }
           write_manifest manifest.json "Bloop's Room" bloop_room
           write_manifest manifest-hello.json "Screen and touch test" hello_touch
+          # Browsers keep GitHub Pages files for 10 minutes. Stamp this build into the
+          # page's links so a new build is never mixed up with a cached older one.
+          V="${GITHUB_SHA::7}"
+          sed -i "s|manifest=\"manifest.json\"|manifest=\"manifest.json?v=$V\"|; s|manifest=\"manifest-hello.json\"|manifest=\"manifest-hello.json?v=$V\"|; s|__BUILD__|$V|g" _site/index.html
+          grep -n "manifest.*?v=\|BUILD = " _site/index.html
           cat _site/manifest.json _site/manifest-hello.json
           ls -la _site _site/firmware
 

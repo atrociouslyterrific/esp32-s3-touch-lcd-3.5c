@@ -938,8 +938,9 @@ document.getElementById("clearBtn").addEventListener("click", () => { history = 
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redrawAll);
 window.addEventListener("resize", () => queueDraw());
 
-fetch("voice.json").then(r => r.json()).then(v => { voice = voice?.liveCurve ? Object.assign(v, { curve: voice.curve, liveCurve: true }) : v; redrawAll(); }).catch(() => {});
-fetch("manifest.json").then(r => r.json()).then(m => {
+fetch("voice.json?v=" + "__BUILD__", { cache: "no-store" }).then(r => r.json()).then(v => { voice = voice?.liveCurve ? Object.assign(v, { curve: voice.curve, liveCurve: true }) : v; redrawAll(); }).catch(() => {});
+const BUILD = "__BUILD__";   // filled in by GitHub when it publishes the site
+fetch("manifest.json?v=" + BUILD, { cache: "no-store" }).then(r => r.json()).then(m => {
   if (m.version) setText("buildInfo", "Firmware build " + m.version);
 }).catch(() => {});
 
