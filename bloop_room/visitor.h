@@ -50,7 +50,7 @@ enum : uint8_t { PIP_IDLE, PIP_NAP, PIP_EAT, PIP_EXPLORE, PIP_PLAY, PIP_SING, PI
 // to -45; a metre apart about -50 to -60. Pip comes in above NEAR and leaves
 // below FAR (the gap stops it flickering in and out at the edge).
 const int PIP_NEAR_DBM = -52;
-const int PIP_FAR_DBM = -64;
+const int PIP_FAR_DBM = -62;
 
 struct Visitor {
   Body body;
@@ -314,7 +314,7 @@ void visitorRadio(float dt) {
   pipNearT = (heardLately && pipRssi >= PIP_NEAR_DBM) ? pipNearT + dt : 0;
   pipFarT = (heardLately && pipRssi <= PIP_FAR_DBM) ? pipFarT + dt : 0;
   if (!pip.here && pipNearT > 1.5f) visitorArrive();
-  else if (pip.here && (quiet > 6000 || pipFarT > 4.0f)) visitorLeave();
+  else if (pip.here && (quiet > 4000 || pipFarT > 3.0f)) visitorLeave();   // same limits as Pip's own check, so both screens agree
 
   // Tell Pip it is in our room. (Pip's radio naps to save battery, so say it often.)
   if (pip.here) {
