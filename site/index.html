@@ -133,6 +133,15 @@ table.recent td.n { font-variant-numeric: tabular-nums; text-align: right; }
 .steps { margin: 6px 0 0; padding-left: 20px; color: var(--ink-2); font-size: 14px; }
 .warn { color: var(--critical); font-size: 13px; }
 details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; margin-top: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 650; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); }
+.chip .dot.run { background: var(--series-1); animation: pulse 1.2s ease-in-out infinite; }
+.chip .dot.ok { background: var(--good); }
+.chip .dot.bad { background: var(--critical); }
+@keyframes pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .chip .dot.run { animation: none; } }
+.progress { height: 10px; border-radius: 5px; background: var(--grid); overflow: hidden; margin: 12px 0 4px; }
+.progress .fill { height: 100%; background: var(--series-1); width: 0; transition: width .6s; }
+a { color: var(--series-1); }
 </style>
 </head>
 <body>
@@ -196,9 +205,24 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; margin-
       <div style="overflow-x:auto"><div class="chart" id="loopDiagram" style="min-width:720px"></div></div>
     </section>
 
+    <section class="card span-12" id="trainCard">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0">Training Bloop's voice on GitHub</h2>
+        <span class="chip"><span class="dot" id="trDot"></span><span id="trState">Checking…</span></span>
+      </div>
+      <p class="note" style="margin-top:6px" id="trNote">GitHub trains Bloop's language model whenever its training code changes. This updates live while it runs.</p>
+      <div class="progress" aria-hidden="true"><div class="fill" id="trBar"></div></div>
+      <div class="tiles" style="margin-top:12px">
+        <div class="tile"><div class="label">Step</div><div class="value" id="trStep">–</div><div class="hint" id="trPct">&nbsp;</div></div>
+        <div class="tile"><div class="label">Loss right now</div><div class="value" id="trLoss">–</div><div class="hint">lower = better</div></div>
+        <div class="tile"><div class="label">Time training</div><div class="value" id="trTime">–</div><div class="hint" id="trEta">&nbsp;</div></div>
+        <div class="tile"><div class="label">Last update</div><div class="value" id="trAgo">–</div><div class="hint" id="trLink">&nbsp;</div></div>
+      </div>
+    </section>
+
     <section class="card span-12">
       <h2>Bloop's voice: a tiny language model</h2>
-      <p class="note">This part <b>is</b> a neural network: a tiny transformer, the same kind of model as large language models, just about 2,000 times smaller than GPT-2. GitHub trains it on example lines every time the code changes, and it runs on the board itself. It reads how Bloop feels and what just happened, then writes one word at a time, feeding each word back in to choose the next.</p>
+      <p class="note">This part <b>is</b> a neural network: a tiny transformer, the same kind of model as large language models, just about 2,000 times smaller than GPT-2. GitHub trains it on example lines every time its training code changes (progress shows live above), and it runs on the board itself. It reads how Bloop feels and what just happened, then writes one word at a time, feeding each word back in to choose the next.</p>
       <div style="overflow-x:auto"><div class="chart" id="voiceDiagram" style="min-width:720px"></div></div>
       <div class="tiles" style="margin-top:12px">
         <div class="tile"><div class="label">Parameters</div><div class="value" id="vParams">–</div><div class="hint">the numbers it learned</div></div>
@@ -769,7 +793,7 @@ function drawVoiceLoss() {
 }
 
 function drawVoiceStats() {
-  if (!voice) return;
+  if (!voice || voice.params == null) return;
   setText("vParams", voice.params.toLocaleString());
   setText("vVocab", voice.vocab);
   setText("vLoss", voice.loss.toFixed(2));
@@ -914,12 +938,90 @@ document.getElementById("clearBtn").addEventListener("click", () => { history = 
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redrawAll);
 window.addEventListener("resize", () => queueDraw());
 
-fetch("voice.json").then(r => r.json()).then(v => { voice = v; redrawAll(); }).catch(() => {});
+fetch("voice.json").then(r => r.json()).then(v => { voice = voice?.liveCurve ? Object.assign(v, { curve: voice.curve, liveCurve: true }) : v; redrawAll(); }).catch(() => {});
 fetch("manifest.json").then(r => r.json()).then(m => {
   if (m.version) setText("buildInfo", "Firmware build " + m.version);
 }).catch(() => {});
 
+
+// ---------- live training status (from the repo's "status" branch) ----------
+let REPO = (() => {
+  if (!location.hostname.endsWith(".github.io")) return "atrociouslyterrific/esp32-s3-touch-lcd-3.5c";
+  return location.hostname.split(".")[0] + "/" + (location.pathname.split("/").filter(Boolean)[0] || "esp32-s3-touch-lcd-3.5c");
+})();
+let trStatus = null, trRun = null, trTimer = null, trApiAt = 0;
+const fmtDur = sec => sec == null ? "–" : sec < 60 ? Math.round(sec) + "s" : sec < 3600 ? Math.floor(sec / 60) + "m " + String(Math.round(sec % 60)).padStart(2, "0") + "s" : Math.floor(sec / 3600) + "h " + Math.floor(sec % 3600 / 60) + "m";
+const fmtAgo = iso => { if (!iso) return "–"; const s = (Date.now() - Date.parse(iso)) / 1000; return s < 90 ? Math.max(0, Math.round(s)) + "s ago" : s < 5400 ? Math.round(s / 60) + "m ago" : s < 129600 ? Math.round(s / 3600) + "h ago" : Math.round(s / 86400) + "d ago"; };
+const rawStatus = path => fetch(`https://raw.githubusercontent.com/${REPO}/status/${path}?t=${Date.now()}`, { cache: "no-store" }).then(r => r.ok ? r.json() : null).catch(() => null);
+
+async function fetchTraining() {
+  // The newest per-minute copy beats the raw server's 5-minute cache of status.json.
+  const m = Math.floor(Date.now() / 60000);
+  const tries = await Promise.all([m, m - 1, m - 2, m - 3].map(k => rawStatus(`m/${k}.json`)));
+  let s = tries.find(Boolean) || await rawStatus("status.json");
+  if (s && trStatus && trStatus.updated && s.updated && s.updated < trStatus.updated) s = trStatus;
+  trStatus = s;
+  if (Date.now() - trApiAt > 60000) {   // GitHub's API allows 60 calls an hour without signing in
+    trApiAt = Date.now();
+    try {
+      const r = await fetch(`https://api.github.com/repos/${REPO}/actions/workflows/train.yml/runs?per_page=1`);
+      if (r.ok) trRun = (await r.json()).workflow_runs?.[0] || null;
+    } catch (e) {}
+  }
+  drawTraining();
+  const busy = ["starting", "training", "checking", "trained"].includes(trStatus?.state) || (trRun && trRun.status !== "completed");
+  clearTimeout(trTimer);
+  trTimer = setTimeout(fetchTraining, busy ? 15000 : 60000);
+}
+
+function drawTraining() {
+  const s = trStatus, run = trRun;
+  let word = "No training yet", cls = "", note = "GitHub trains Bloop's language model whenever its training code changes. This updates live while it runs.";
+  const stale = s?.updated && Date.now() - Date.parse(s.updated) > 15 * 60000;
+  if (run && run.status !== "completed" && (!s || ["done", "failed"].includes(s.state) || Date.parse(run.created_at) > Date.parse(s.updated || 0))) {
+    word = run.status === "queued" ? "Waiting for a GitHub computer" : "Starting"; cls = "run";
+    note = "A new training run has started on GitHub. Progress shows here once the model is loaded.";
+  } else if (s?.state === "training" || s?.state === "starting") {
+    word = stale ? "Training (no news for a while)" : s.state === "starting" ? "Getting ready" : "Training"; cls = stale ? "" : "run";
+    note = "Bloop's voice is learning right now on a GitHub computer. The loss chart below fills in as it goes.";
+  } else if (s?.state === "checking" || s?.state === "trained") {
+    word = "Checking the board's code"; cls = "run";
+    note = "Training finished. GitHub is checking the board's 8-bit version gives the same answers.";
+  } else if (s?.state === "done") {
+    word = "Trained " + fmtAgo(s.updated); cls = "ok";
+    note = "Done. The website's Install button gets the new voice once GitHub rebuilds the firmware (a few minutes after training).";
+  } else if (s?.state === "failed" || (run && run.status === "completed" && run.conclusion === "failure")) {
+    word = "Training failed"; cls = "bad";
+    note = "The last training run didn't finish. The firmware keeps the previous voice. The run's log on GitHub says why.";
+  }
+  setText("trState", word);
+  document.getElementById("trDot").className = "dot " + cls;
+  setText("trNote", note);
+  const step = s?.step ?? null, steps = s?.steps ?? null;
+  const frac = step != null && steps ? Math.min(1, step / steps) : (s?.state === "done" ? 1 : 0);
+  document.getElementById("trBar").style.width = (frac * 100).toFixed(1) + "%";
+  setText("trStep", step != null && steps ? step.toLocaleString() + " / " + steps.toLocaleString() : "–");
+  setText("trPct", step != null && steps ? Math.round(frac * 100) + "% done" : "\u00a0");
+  setText("trLoss", s?.loss != null ? s.loss.toFixed(2) : "–");
+  setText("trTime", fmtDur(s?.elapsed_s));
+  const live = s?.state === "training" && step > 0 && steps > step && s.elapsed_s;
+  setText("trEta", live ? "about " + fmtDur(s.elapsed_s / step * (steps - step)) + " to go" : "\u00a0");
+  setText("trAgo", fmtAgo(s?.updated));
+  const link = document.getElementById("trLink");
+  link.replaceChildren();
+  const url = (run && run.status !== "completed") ? run.html_url : (s?.run_url || run?.html_url);
+  if (url) { const a = document.createElement("a"); a.href = url; a.target = "_blank"; a.rel = "noopener"; a.textContent = "Open the run on GitHub"; link.appendChild(a); }
+  else link.textContent = "\u00a0";
+  // While training, the loss chart shows the live curve.
+  if (s?.curve?.length > 1 && ["training", "checking", "trained"].includes(s.state)) {
+    voice = Object.assign({}, voice || {}, { curve: s.curve, liveCurve: true });
+    drawVoiceLoss();
+  }
+}
+
 redrawAll();
+fetchTraining();
+setInterval(drawTraining, 10000);  // keep "x ago" fresh
 </script>
 </body>
 </html>

@@ -5,8 +5,17 @@ name: Build and publish
 
 on:
   push:
+    branches-ignore: [status]
   pull_request:
   workflow_dispatch:
+  workflow_run:  # rebuild (and republish the website) after a new voice is trained
+    workflows: ["Train Bloop's voice"]
+    types: [completed]
+
+# One publish at a time; a waiting one is replaced by a newer one.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -17,28 +26,34 @@ env:
 
 jobs:
   build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: arduino/setup-arduino-cli@v2
 
-      # ---- Bloop's voice: train the tiny language model (cached until the training code changes) ----
-      - uses: actions/cache@v4
-        id: voice-cache
-        with:
-          path: |
-            bloop_room/voice_weights.h
-            training/out
-          key: voice-${{ hashFiles('training/voice_corpus.py', 'training/train_voice.py') }}
+      # ---- Bloop's voice: "Train Bloop's voice" trains it and saves it to the "voice" release ----
+      - name: Get Bloop's trained voice
+        id: voice
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p training/out
+          if gh release download voice -R "${{ github.repository }}" -p voice_weights.h -D bloop_room --clobber \
+             && gh release download voice -R "${{ github.repository }}" -p voice_samples.json -p voice_test.txt -D training/out --clobber; then
+            echo "Using the voice from the voice release"; echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No trained voice yet - training a quick one here"; echo "have=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/setup-python@v5
-        if: steps.voice-cache.outputs.cache-hit != 'true'
+        if: steps.voice.outputs.have != 'true'
         with:
           python-version: "3.12"
 
-      - name: Train Bloop's voice
-        if: steps.voice-cache.outputs.cache-hit != 'true'
+      - name: Train Bloop's voice (only if there's no saved one)
+        if: steps.voice.outputs.have != 'true'
         run: |
           pip install --quiet numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
           python training/train_voice.py
@@ -68,6 +83,7 @@ jobs:
           mkdir -p _site/firmware
           cp -r site/. _site/
           cp training/out/voice_samples.json _site/voice.json
+          echo "{\"repo\":\"${{ github.repository }}\"}" > _site/repo.json
           BOOT_APP0="$(find ~/.arduino15/packages/esp32/hardware/esp32 -name boot_app0.bin | head -1)"
           cp "$BOOT_APP0" _site/firmware/boot_app0.bin
           # Separate parts (not one merged file) so updating never wipes Bloop's saved brain.

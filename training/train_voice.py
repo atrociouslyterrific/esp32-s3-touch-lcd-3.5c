@@ -21,6 +21,21 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_corpus as VC  # noqa: E402
 
+
+# ---------- live progress for the website (GitHub's workflow pushes this file to the "status" branch) ----------
+STATUS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "training", "out", "status.json")
+_status = {}
+
+
+def write_status(**kw):
+    _status.update(kw)
+    _status["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    os.makedirs(os.path.dirname(STATUS), exist_ok=True)
+    tmp = STATUS + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(_status, f)
+    os.replace(tmp, STATUS)  # never leave a half-written file for the uploader
+
 SEED = 3
 D, H, L, T = 64, 4, 2, 32          # width, heads, layers, context length
 FF = 4 * D
@@ -262,6 +277,10 @@ def main():
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=LR, total_steps=STEPS, pct_start=0.1)
     t0 = time.time()
     losses = []
+    write_status(state="training", step=0, steps=STEPS, loss=None, elapsed_s=0, params=nparams, vocab=V,
+                 started=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), curve=[],
+                 run_url=os.environ.get("RUN_URL"), commit=os.environ.get("GITHUB_SHA", "")[:7] or None)
+    last_write = 0.0
     for step in range(STEPS):
         x, y = make_batch(train, rng)
         loss = F.cross_entropy(model(x).view(-1, V), y.view(-1), ignore_index=-1)
@@ -271,10 +290,16 @@ def main():
         opt.step()
         sched.step()
         losses.append(loss.item())
+        if step % 25 == 0 and time.time() - last_write > 5:
+            last_write = time.time()
+            write_status(step=step + 1, loss=round(float(np.mean(losses[-100:])), 4), elapsed_s=round(time.time() - t0),
+                         curve=[round(float(np.mean(losses[max(0, i - 50):i + 1])), 4) for i in range(0, step + 1, 25)])
         if step % 250 == 0 or step == STEPS - 1:
             print(f"step {step:5d}  loss {np.mean(losses[-100:]):.3f}  ({time.time() - t0:.0f}s)")
     model.eval()
     final = float(np.mean(losses[-200:]))
+    write_status(state="checking", step=STEPS, loss=round(final, 4), elapsed_s=round(time.time() - t0),
+                 curve=[round(float(np.mean(losses[max(0, i - 50):i + 1])), 4) for i in range(0, STEPS, 25)])
 
     P = export_params(model)
 
@@ -314,6 +339,7 @@ def main():
     with open(os.path.join(OUT, "voice_samples.json"), "w") as f:
         json.dump(stats, f, indent=1)
     write_header(P, stats)
+    write_status(state="trained", agree=agree, of=len(test_prompts), samples=samples)
     for s in samples:
         print(" ".join(s["feels"]), "->", s["says"])
     print(f"wrote {HEADER} ({os.path.getsize(HEADER) // 1024} KB)")

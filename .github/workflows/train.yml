@@ -1,0 +1,98 @@
+name: Train Bloop's voice
+
+# Trains Bloop's tiny language model on GitHub's computers, checks the board's C code
+# gives the same answers, and saves the result to the "voice" release. Progress is pushed
+# live to the "status" branch, which the website reads. When it finishes, "Build and
+# publish" runs again so the website's firmware has the new voice.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "training/**"
+      - ".github/workflows/train.yml"
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: "Training steps (more = longer training, usually better)"
+        type: string
+        default: "3000"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: train-voice
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: ubuntu-24.04-arm  # same pool as Pip's repo (x64 runners were unreliable, Nov 2026)
+    timeout-minutes: 120
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tell the website training is starting
+        run: |
+          mkdir -p training/out
+          echo "{\"state\":\"starting\",\"run_url\":\"$RUN_URL\",\"commit\":\"${GITHUB_SHA::7}\",\"updated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > training/out/status.json
+          bash training/push_status.sh || true
+
+      - name: Install PyTorch (CPU) and numpy
+        run: pip install --quiet numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+
+      - name: Train (live progress goes to the website)
+        env:
+          BLOOP_VOICE_STEPS: ${{ github.event.inputs.steps || '3000' }}
+        run: |
+          python training/train_voice.py & PID=$!
+          while kill -0 $PID 2>/dev/null; do
+            sleep 20
+            bash training/push_status.sh || true
+          done
+          wait $PID
+
+      - name: Check the board's model code matches the trained model
+        run: |
+          gcc -O2 -Wall -I bloop_room training/test_voice.c -o test_voice -lm
+          ./test_voice training/out/voice_test.txt | tee test.txt
+
+      - name: Save the voice for the build
+        run: |
+          gh release view voice >/dev/null 2>&1 || \
+            gh release create voice --prerelease --title "Bloop's trained voice" \
+              --notes "The newest trained language model. The build puts it into the firmware. Not for flashing."
+          gh release upload voice --clobber bloop_room/voice_weights.h training/out/voice_samples.json training/out/voice_test.txt
+
+      - name: Tell the website training is done
+        run: |
+          python - <<'EOF'
+          import json
+          p = "training/out/status.json"
+          s = json.load(open(p))
+          s["state"] = "done"
+          s["c_test"] = "pass"
+          import time; s["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+          json.dump(s, open(p, "w"))
+          EOF
+          bash training/push_status.sh
+
+      - name: Tell the website training failed
+        if: failure()
+        run: |
+          python - <<'EOF'
+          import json, os
+          p = "training/out/status.json"
+          s = json.load(open(p)) if os.path.exists(p) else {}
+          s["state"] = "failed"
+          import time; s["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+          json.dump(s, open(p, "w"))
+          EOF
+          bash training/push_status.sh || true
