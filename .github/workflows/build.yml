@@ -23,6 +23,31 @@ jobs:
 
       - uses: arduino/setup-arduino-cli@v2
 
+      # ---- Bloop's voice: train the tiny language model (cached until the training code changes) ----
+      - uses: actions/cache@v4
+        id: voice-cache
+        with:
+          path: |
+            bloop_room/voice_weights.h
+            training/out
+          key: voice-${{ hashFiles('training/voice_corpus.py', 'training/train_voice.py') }}
+
+      - uses: actions/setup-python@v5
+        if: steps.voice-cache.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Train Bloop's voice
+        if: steps.voice-cache.outputs.cache-hit != 'true'
+        run: |
+          pip install --quiet numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+          python training/train_voice.py
+
+      - name: Check the board's model code matches the trained model
+        run: |
+          gcc -O2 -Wall -I bloop_room training/test_voice.c -o test_voice -lm
+          ./test_voice training/out/voice_test.txt
+
       - name: Install the ESP32 board package and libraries
         run: |
           arduino-cli core update-index --additional-urls "$ESP32_URL"
@@ -42,6 +67,7 @@ jobs:
         run: |
           mkdir -p _site/firmware
           cp -r site/. _site/
+          cp training/out/voice_samples.json _site/voice.json
           BOOT_APP0="$(find ~/.arduino15/packages/esp32/hardware/esp32 -name boot_app0.bin | head -1)"
           cp "$BOOT_APP0" _site/firmware/boot_app0.bin
           # Separate parts (not one merged file) so updating never wipes Bloop's saved brain.

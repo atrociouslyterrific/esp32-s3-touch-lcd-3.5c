@@ -196,6 +196,30 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; margin-
       <div style="overflow-x:auto"><div class="chart" id="loopDiagram" style="min-width:720px"></div></div>
     </section>
 
+    <section class="card span-12">
+      <h2>Bloop's voice: a tiny language model</h2>
+      <p class="note">This part <b>is</b> a neural network: a tiny transformer, the same kind of model as large language models, just about 2,000 times smaller than GPT-2. GitHub trains it on example lines every time the code changes, and it runs on the board itself. It reads how Bloop feels and what just happened, then writes one word at a time, feeding each word back in to choose the next.</p>
+      <div style="overflow-x:auto"><div class="chart" id="voiceDiagram" style="min-width:720px"></div></div>
+      <div class="tiles" style="margin-top:12px">
+        <div class="tile"><div class="label">Parameters</div><div class="value" id="vParams">–</div><div class="hint">the numbers it learned</div></div>
+        <div class="tile"><div class="label">Words it knows</div><div class="value" id="vVocab">–</div></div>
+        <div class="tile"><div class="label">Training loss</div><div class="value" id="vLoss">–</div><div class="hint">lower = better at guessing the next word</div></div>
+        <div class="tile"><div class="label">Board code check</div><div class="value" id="vCheck">–</div><div class="hint">8-bit model vs. full model</div></div>
+      </div>
+    </section>
+
+    <section class="card span-6">
+      <h2>Learning to talk</h2>
+      <p class="note">Training loss as GitHub trained the model. It drops as the model gets better at guessing Bloop's next word.</p>
+      <div class="chart" id="voiceLoss"></div>
+    </section>
+
+    <section class="card span-6">
+      <h2>What Bloop says</h2>
+      <p class="note" id="sayNote">Live from the board once connected. Until then, lines the model wrote while it was being tested on GitHub.</p>
+      <ul class="log" id="sayLog"></ul>
+    </section>
+
     <section class="card span-8">
       <h2>Is it getting better?</h2>
       <p class="note">Average reward over its last 25 choices. Higher means Bloop is choosing things that work out: eating when hungry, sleeping when tired, not getting hurt, earning your GOOD.</p>
@@ -674,7 +698,99 @@ function drawLoopDiagram() {
   svgText(svg, (xl + xr) / 2, y + bh + 62, "…then sense again, with one number in the table nudged", { "text-anchor": "middle", "font-size": 12, fill: ink2 });
 }
 
-function redrawAll() { drawBrainDiagram(); drawLoopDiagram(); drawRewardChart(); drawNow(); drawMix(); drawHabits(); drawHeat(); drawRecent(); drawLog(); }
+// ---------- voice ----------
+let voice = null, sayings = [];
+
+function drawVoiceDiagram() {
+  const box = document.getElementById("voiceDiagram");
+  box.replaceChildren();
+  const W = 980, H = 300;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Bloop's language model: feelings and event tokens go through word embeddings and two transformer blocks to next-word scores, and each chosen word is fed back in" }, box);
+  const ink = cssVar("--ink"), ink2 = cssVar("--ink-2"), muted = cssVar("--muted"), surface = cssVar("--surface"), border = cssVar("--axis"), accent = cssVar("--series-1");
+  el("defs", {}, svg).innerHTML = `<marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${border}"/></marker>`;
+  const latest = sayings.length ? sayings[sayings.length - 1] : null;
+  const feels = latest && latest.feels ? latest.feels : ["hunger:hungry", "energy:awake", "mood:happy", "room:tilt", "event:fall"];
+  // 1. input tokens
+  svgText(svg, 20, 24, "Input: how Bloop feels", { "font-weight": 650, fill: ink2 });
+  feels.slice(0, 7).forEach((t, i) => {
+    const y = 40 + i * 30;
+    el("rect", { x: 20, y, width: 150, height: 24, rx: 12, fill: surface, stroke: t.startsWith("event") ? accent : border, "stroke-width": t.startsWith("event") ? 2 : 1 }, svg);
+    svgText(svg, 95, y + 16, t, { "text-anchor": "middle", "font-size": 11.5 });
+  });
+  const blocks = [
+    [210, "Word embeddings", ["each word → 64 numbers", "+ its position"]],
+    [400, "Transformer block 1", ["attention: 4 heads look", "back at earlier words", "then a 256-wide layer"]],
+    [590, "Transformer block 2", ["same again, on top", "of block 1"]],
+    [780, "Next-word scores", [voice ? voice.vocab + " words scored" : "every word scored", "pick one of the top 12"]],
+  ];
+  blocks.forEach(([x, title, lines], i) => {
+    const y = 60, w = 160, h = 130;
+    el("rect", { x, y, width: w, height: h, rx: 14, fill: surface, stroke: i === 1 || i === 2 ? accent : border, "stroke-width": i === 1 || i === 2 ? 2 : 1.5 }, svg);
+    svgText(svg, x + 12, y + 26, title, { "font-weight": 700, "font-size": 13 });
+    lines.forEach((l, k) => svgText(svg, x + 12, y + 52 + k * 18, l, { "font-size": 11.5, fill: ink2 }));
+    const prevX = i === 0 ? 172 : blocks[i - 1][0] + w + 2;
+    el("line", { x1: prevX, y1: y + h / 2, x2: x - 4, y2: y + h / 2, stroke: border, "stroke-width": 2, "marker-end": "url(#arr2)" }, svg);
+  });
+  // feedback loop
+  el("path", { d: `M860,192 C860,262 290,262 290,194`, fill: "none", stroke: border, "stroke-width": 2, "stroke-dasharray": "5 5", "marker-end": "url(#arr2)" }, svg);
+  const said = latest ? "“" + latest.text + "”" : "“ow ! the floor moved !”";
+  svgText(svg, 575, 250, "each chosen word is fed back in, until it picks <end>", { "text-anchor": "middle", "font-size": 12, fill: ink2 });
+  svgText(svg, 575, 282, (latest ? "Just said: " : "For example: ") + said, { "text-anchor": "middle", "font-size": 14, "font-weight": 650, fill: ink });
+}
+
+function drawVoiceLoss() {
+  const box = document.getElementById("voiceLoss");
+  box.replaceChildren();
+  if (!voice || !voice.curve) { const d = document.createElement("div"); d.className = "empty"; d.textContent = "Training stats appear after GitHub trains the model."; box.appendChild(d); return; }
+  const pts = voice.curve.map((v, i) => ({ x: i * 25, y: v }));
+  const W = 480, H = 220, m = { l: 40, r: 12, t: 12, b: 28 };
+  const x1 = pts[pts.length - 1].x, y1 = Math.max(...pts.map(p => p.y)) * 1.05;
+  const X = v => m.l + v / x1 * (W - m.l - m.r), Y = v => m.t + (1 - v / y1) * (H - m.t - m.b);
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Training loss by step" }, box);
+  for (const t of niceTicks(0, y1, 4)) {
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), stroke: t === 0 ? cssVar("--axis") : cssVar("--grid") }, svg);
+    svgText(svg, m.l - 6, Y(t) + 4, String(t), { "text-anchor": "end", "font-size": 11, fill: cssVar("--muted") });
+  }
+  for (const t of niceTicks(0, x1, 4)) svgText(svg, X(t), H - 8, String(t), { "text-anchor": "middle", "font-size": 11, fill: cssVar("--muted") });
+  let d = ""; pts.forEach((p, i) => d += (i ? "L" : "M") + X(p.x).toFixed(1) + "," + Y(p.y).toFixed(1));
+  el("path", { d, fill: "none", stroke: cssVar("--series-1"), "stroke-width": 2, "stroke-linejoin": "round" }, svg);
+  const lp = pts[pts.length - 1];
+  svgText(svg, X(lp.x) - 4, Y(lp.y) - 10, lp.y.toFixed(2), { "text-anchor": "end", "font-size": 12, "font-weight": 600 });
+  const cross = el("line", { y1: m.t, y2: H - m.b, stroke: cssVar("--axis"), visibility: "hidden" }, svg);
+  const hit = el("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, fill: "transparent" }, svg);
+  hit.addEventListener("pointermove", e => {
+    const r = svg.getBoundingClientRect(), vx = (e.clientX - r.left) / r.width * W;
+    let best = pts[0]; for (const p of pts) if (Math.abs(X(p.x) - vx) < Math.abs(X(best.x) - vx)) best = p;
+    cross.setAttribute("x1", X(best.x)); cross.setAttribute("x2", X(best.x)); cross.setAttribute("visibility", "visible");
+    showTip(e, [best.y.toFixed(3) + " loss", "training step " + best.x]);
+  });
+  hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); hideTip(); });
+}
+
+function drawVoiceStats() {
+  if (!voice) return;
+  setText("vParams", voice.params.toLocaleString());
+  setText("vVocab", voice.vocab);
+  setText("vLoss", voice.loss.toFixed(2));
+  setText("vCheck", voice.agree + "/" + voice.of + " same");
+}
+
+function drawSayLog() {
+  const ul = document.getElementById("sayLog");
+  ul.replaceChildren();
+  let rows = sayings.slice(-30).reverse();
+  if (!rows.length && voice && voice.samples) rows = voice.samples.map(s => ({ text: s.says, ev: (s.feels.find(f => f.startsWith("event:")) || "").slice(6), time: "test" }));
+  if (!rows.length) { const li = document.createElement("li"); li.className = "empty"; li.style.display = "block"; li.textContent = "Nothing yet."; ul.appendChild(li); return; }
+  rows.forEach(r => {
+    const li = document.createElement("li");
+    const t = document.createElement("span"); t.className = "t"; t.textContent = r.time;
+    const ev = document.createElement("span"); ev.style.color = "var(--muted)"; ev.style.minWidth = "56px"; ev.textContent = r.ev;
+    const tx = document.createElement("span"); tx.className = "tag"; tx.textContent = "“" + r.text + "”";
+    li.append(t, ev, tx); ul.appendChild(li);
+  });
+}
+
+function redrawAll() { drawVoiceDiagram(); drawVoiceLoss(); drawVoiceStats(); drawSayLog(); drawBrainDiagram(); drawLoopDiagram(); drawRewardChart(); drawNow(); drawMix(); drawHabits(); drawHeat(); drawRecent(); drawLog(); }
 
 // ---------- data in ----------
 let drawQueued = false;
@@ -709,6 +825,11 @@ function handleLine(line) {
     if (history.length % 10 === 0) saveHistory();
   } else if (m.t === "q" && Array.isArray(m.q) && m.q.length === NUM_STATES * NA) {
     q = m.q;
+  } else if (m.t === "say") {
+    const feels = last ? describe(last.s).split(", ") : null;
+    sayings.push({ text: m.text, ev: m.ev, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), feels: null });
+    if (sayings.length > 200) sayings = sayings.slice(-200);
+    setText("sayNote", "Live from the board. Each line took the board " + (m.us / 1000).toFixed(0) + " ms to write.");
   } else if (m.t === "ev") {
     events.push({ e: m.e, v: m.v, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) });
     if (events.length > 200) events = events.slice(-200);
@@ -790,6 +911,7 @@ document.getElementById("clearBtn").addEventListener("click", () => { history = 
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redrawAll);
 window.addEventListener("resize", () => queueDraw());
 
+fetch("voice.json").then(r => r.json()).then(v => { voice = v; redrawAll(); }).catch(() => {});
 fetch("manifest.json").then(r => r.json()).then(m => {
   if (m.version) setText("buildInfo", "Firmware build " + m.version);
 }).catch(() => {});

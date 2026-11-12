@@ -30,6 +30,13 @@ const char *const ACTION_THOUGHTS[NUM_ACTIONS] = {
   "la la!", "boing!", "pls food", "eep!", "ooh", "wheee"
 };
 
+// Things Bloop can talk about (same order as EVENTS in training/voice_corpus.py).
+enum SayEvent : uint8_t {
+  SAY_IDLE, SAY_FALL, SAY_SHAKE, SAY_EAT, SAY_OVEREAT, SAY_KICK, SAY_PET, SAY_GOOD, SAY_NO,
+  SAY_WAKE, SAY_SLEEP, SAY_DANCE, SAY_JUMP, SAY_HIDE, SAY_WINDOW, SAY_BEG, SAY_ROLL, SAY_GRIP,
+  SAY_FLOAT, SAY_TOY, NUM_SAY
+};
+
 // The situation is built from 6 yes/no-ish features:
 //   hungry (2) x tired (2) x room (calm / tilting / floating = 3)
 //   x ball near (2) x food out (2) x you're here (2) = 96 situations

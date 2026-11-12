@@ -22,6 +22,16 @@
 #include "FreeSansBold9pt7b.h"
 #include "FreeSansBold12pt7b.h"
 
+// Bloop's voice: a tiny language model trained on GitHub (training/train_voice.py).
+// GitHub generates voice_weights.h before compiling. Without it Bloop just
+// shows short thoughts instead of talking.
+#if __has_include("voice_weights.h")
+#include "voice.h"
+#define BLOOP_HAS_VOICE 1
+#else
+#define BLOOP_HAS_VOICE 0
+#endif
+
 // Board pins are in board.h
 #define LCD_SPI_HZ 80000000     // Waveshare's own firmware runs the screen at 80 MHz
 
@@ -272,7 +282,13 @@ Senses sense() {
 void startAction(Action a) {
   if (a != pet.action) {
     pet.actionTime = 0;
-    pet.bubbleT = 2.2f;
+    if (!BLOOP_HAS_VOICE) pet.bubbleT = 2.2f;
+    const int8_t talk[NUM_ACTIONS] = {-1, SAY_TOY, -1, SAY_SLEEP, SAY_GRIP, -1, -1, -1,
+                                      SAY_DANCE, SAY_JUMP, SAY_BEG, SAY_HIDE, SAY_WINDOW, SAY_ROLL};
+    if (talk[a] >= 0 && (a == ACT_GRIP || frand(0, 1) < 0.6f)) {
+      pet.action = a;   // so say() sees the new action
+      say(talk[a], a == ACT_GRIP);
+    }
   }
   pet.action = a;
   if (a != ACT_SLEEP) pet.asleep = false;
@@ -312,6 +328,58 @@ void sendBrain() {
   Serial.println("]}");
 }
 
+// ---- Talking ----
+uint32_t lastSayMs = 0;
+
+void sendSay(const char *ev, const char *text, unsigned long us) {
+  if (!Serial) return;
+  Serial.printf("{\"t\":\"say\",\"ev\":\"%s\",\"text\":\"%s\",\"us\":%lu}\n", ev, text, us);
+}
+
+#if BLOOP_HAS_VOICE
+BloopVoice voiceModel;   // the model's working memory (~33 KB)
+const char *const SAY_NAMES[NUM_SAY] = {
+  "idle", "fall", "shake", "eat", "overeat", "kick", "pet", "good", "no", "wake", "sleep",
+  "dance", "jump", "hide", "window", "beg", "roll", "grip", "float", "toy"
+};
+const int SAY_TOKENS[NUM_SAY] = {
+  BV_TOK_EVENT_IDLE, BV_TOK_EVENT_FALL, BV_TOK_EVENT_SHAKE, BV_TOK_EVENT_EAT, BV_TOK_EVENT_OVEREAT,
+  BV_TOK_EVENT_KICK, BV_TOK_EVENT_PET, BV_TOK_EVENT_GOOD, BV_TOK_EVENT_NO, BV_TOK_EVENT_WAKE,
+  BV_TOK_EVENT_SLEEP, BV_TOK_EVENT_DANCE, BV_TOK_EVENT_JUMP, BV_TOK_EVENT_HIDE, BV_TOK_EVENT_WINDOW,
+  BV_TOK_EVENT_BEG, BV_TOK_EVENT_ROLL, BV_TOK_EVENT_GRIP, BV_TOK_EVENT_FLOAT, BV_TOK_EVENT_TOY
+};
+float voiceRand() { return (float)(esp_random() >> 8) / 16777216.0f; }
+#endif
+
+// Bloop says something about `ev`. Important things interrupt; chatter waits its turn.
+void say(uint8_t ev, bool important) {
+#if BLOOP_HAS_VOICE
+  if (pet.asleep && ev != SAY_SLEEP) return;
+  uint32_t now = millis();
+  if (now - lastSayMs < (important ? 1200u : 7000u)) return;
+  lastSayMs = now;
+  Senses s = sense();
+  int prompt[12], n = 0;
+  prompt[n++] = s.hungry ? BV_TOK_HUNGER_HUNGRY : BV_TOK_HUNGER_FULL;
+  prompt[n++] = s.tired ? BV_TOK_ENERGY_TIRED : BV_TOK_ENERGY_AWAKE;
+  prompt[n++] = pet.joy > 65 ? BV_TOK_MOOD_HAPPY : (pet.joy < 30 ? BV_TOK_MOOD_SAD : BV_TOK_MOOD_OK);
+  prompt[n++] = s.room == ROOM_CALM ? BV_TOK_ROOM_CALM : (s.room == ROOM_TILTING ? BV_TOK_ROOM_TILT : BV_TOK_ROOM_FLOAT);
+  if (lightsOff) prompt[n++] = BV_TOK_DARK;
+  if (s.attention) prompt[n++] = BV_TOK_YOU;
+  prompt[n++] = SAY_TOKENS[ev];
+  prompt[n++] = BV_TOK_SAY;
+  int words[20];
+  uint32_t t0 = micros();
+  int nw = bv_generate(&voiceModel, prompt, n, words, 16, 0.8f, 12, voiceRand);
+  unsigned long us = micros() - t0;
+  bv_text(words, nw, sayText, sizeof(sayText));
+  sayT = 3.5f;
+  sendSay(SAY_NAMES[ev], sayText, us);
+#else
+  (void)ev; (void)important;
+#endif
+}
+
 void think() {
   curState = encodeState(sense());
   float r = rewardAcc;
@@ -335,6 +403,7 @@ void hurt(float dmg) {
   pet.falls++;
   decideNow = true;
   sendEvent("fall", dmg);
+  say(SAY_FALL, true);
 }
 
 void onShake() {
@@ -355,6 +424,7 @@ void onShake() {
   }
   decideNow = true;
   sendEvent("shake", lastShakeMag);
+  say(SAY_SHAKE, true);
 }
 
 // ============================================================ the world
@@ -593,6 +663,7 @@ void eatAndPlay() {
       pet.eatT = 0.8f;
       pet.treats++;
       sendEvent("eat", before);
+      say(before < 20 ? SAY_OVEREAT : SAY_EAT, true);
       if (before > 55) rewardAcc += 2.0f * before / 100.0f;
       else if (before < 20) { rewardAcc -= 0.8f; pet.sadT = 1.0f; }   // tummy ache
       else rewardAcc += 0.4f;
@@ -613,6 +684,7 @@ void eatAndPlay() {
     pet.kickCool = 0.6f;
     pet.kicks++;
     sendEvent("kick", pet.energy);
+    say(SAY_KICK, false);
     pet.joy = clampf(pet.joy + 6, 0, 100);
     pet.energy -= 1.5f;
     rewardAcc += pet.energy > 15 ? 0.6f : -0.2f;
@@ -651,6 +723,7 @@ void updateNeeds(float dt) {
 
   pet.hurtT -= dt; pet.dizzyT -= dt; pet.eatT -= dt; pet.sadT -= dt;
   pet.kickCool -= dt; pet.hopCool -= dt; pet.bubbleT -= dt; pet.blinkT -= dt;
+  sayT -= dt;
   if (pet.blinkT < -0.15f) pet.blinkT = frand(2, 5);
   pet.actionTime += dt;
 }
@@ -661,6 +734,12 @@ void updateWorld(float dt) {
 
   updateNeeds(dt);
   petBehave(dt);
+
+  // Things worth mentioning
+  static bool wasAsleep = false, wasFloating = false;
+  if (pet.asleep != wasAsleep) { wasAsleep = pet.asleep; say(pet.asleep ? SAY_SLEEP : SAY_WAKE, true); }
+  if (floating != wasFloating) { wasFloating = floating; if (floating) say(SAY_FLOAT, true); }
+  if (millis() - lastSayMs > 25000 && !pet.asleep) say(SAY_IDLE, false);
 
   // Bed shape follows the floor: wide along it, short away from it.
   uint8_t fw = floorWall(gScreen);
@@ -1480,6 +1559,7 @@ void toolbarTap(int i) {
       decideNow = true;
       sinceDecide = 1;   // credit it to what Bloop is doing right now
       sendEvent("good", 2.5f);
+      say(SAY_GOOD, true);
       break;
     case 3:   // NO
       rewardAcc -= 2.5f;
@@ -1487,6 +1567,7 @@ void toolbarTap(int i) {
       decideNow = true;
       sinceDecide = 1;
       sendEvent("no", -2.5f);
+      say(SAY_NO, true);
       break;
     case 4:
       screen = (screen == SCR_ROOM) ? SCR_MENU : SCR_ROOM;
@@ -1552,7 +1633,10 @@ void readTouch(float dt) {
       petting = false;
       if (grabCand == GRAB_PET) { pet.held = true; pet.asleep = false; }
     }
-    if (grabCand == GRAB_PET && !grabbing && millis() - fStartMs > 150) petting = true;
+    if (grabCand == GRAB_PET && !grabbing && millis() - fStartMs > 150) {
+      if (!petting) say(SAY_PET, true);
+      petting = true;
+    }
     return;
   }
 
