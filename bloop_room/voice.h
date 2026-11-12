@@ -11,10 +11,13 @@
 #include <string.h>
 #include "voice_weights.h"
 
+// All working memory lives here (not on the stack): ~150 KB for the 256-wide model,
+// so the board keeps it in PSRAM.
 typedef struct {
   float k[BV_L][BV_T][BV_D];
   float v[BV_L][BV_T][BV_D];
   float logits[BV_V];
+  float x[BV_D], h[BV_D], qkv[3 * BV_D], att[BV_D], tmp[BV_D], ff[BV_FF], sc[BV_T];
   int pos;
 } BloopVoice;
 
@@ -46,7 +49,7 @@ static void bv_reset(BloopVoice *m) { m->pos = 0; }
 
 // Feed one token; leaves the next-word scores in m->logits.
 static void bv_step(BloopVoice *m, int tok) {
-  float x[BV_D], h[BV_D], qkv[3 * BV_D], att[BV_D], tmp[BV_D], ff[BV_FF];
+  float *x = m->x, *h = m->h, *qkv = m->qkv, *att = m->att, *tmp = m->tmp, *ff = m->ff, *sc = m->sc;
   const int hd = BV_D / BV_H;
   const float inv = 1.0f / sqrtf((float)hd);
   int p = m->pos;
@@ -59,7 +62,7 @@ static void bv_step(BloopVoice *m, int tok) {
     memcpy(m->v[l][p], qkv + 2 * BV_D, sizeof(float) * BV_D);
     for (int hh = 0; hh < BV_H; hh++) {
       int o = hh * hd;
-      float sc[BV_T], mx = -1e30f, sum = 0;
+      float mx = -1e30f, sum = 0;
       for (int t = 0; t <= p; t++) {
         float d = 0;
         for (int i = 0; i < hd; i++) d += m->k[l][t][o + i] * qkv[o + i];

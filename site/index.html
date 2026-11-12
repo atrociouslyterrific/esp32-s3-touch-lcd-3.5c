@@ -231,7 +231,7 @@ a { color: var(--series-1); }
 
     <section class="card span-12">
       <h2>Bloop's voice: a tiny language model</h2>
-      <p class="note">This part <b>is</b> a neural network: a tiny transformer, the same kind of model as large language models, just about 2,000 times smaller than GPT-2. GitHub keeps training it on fresh example lines every hour (progress shows live above), and it runs on the board itself. It reads how Bloop feels and what just happened, then writes one word at a time, feeding each word back in to choose the next.</p>
+      <p class="note">This part <b>is</b> a neural network: a tiny transformer, the same kind of model as large language models, just <span id="vSmaller">much</span> smaller than GPT-2. GitHub keeps training it on fresh example lines every hour (progress shows live above), and it runs on the board itself. It reads how Bloop feels and what just happened, then writes one word at a time, feeding each word back in to choose the next.</p>
       <div style="overflow-x:auto"><div class="chart" id="voiceDiagram" style="min-width:720px"></div></div>
       <div class="tiles" style="margin-top:12px">
         <div class="tile"><div class="label">Parameters</div><div class="value" id="vParams">–</div><div class="hint">the numbers it learned</div></div>
@@ -751,8 +751,8 @@ function drawVoiceDiagram() {
     svgText(svg, 95, y + 16, t, { "text-anchor": "middle", "font-size": 11.5 });
   });
   const blocks = [
-    [210, "Word embeddings", ["each word → 64 numbers", "+ its position"]],
-    [400, "Transformer block 1", ["attention: 4 heads look", "back at earlier words", "then a 256-wide layer"]],
+    [210, "Word embeddings", ["each word → " + (voice?.width || 256) + " numbers", "+ its position"]],
+    [400, "Transformer block 1", ["attention: " + (voice?.heads || 8) + " heads look", "back at earlier words", "then a " + (voice?.ff || 1024) + "-wide layer"]],
     [590, "Transformer block 2", ["same again, on top", "of block 1"]],
     [780, "Next-word scores", [voice ? voice.vocab + " words scored" : "every word scored", "pick one of the top 12"]],
   ];
@@ -804,6 +804,7 @@ function drawVoiceLoss() {
 function drawVoiceStats() {
   if (!voice || voice.params == null) return;
   setText("vParams", voice.params.toLocaleString());
+  setText("vSmaller", "about " + Math.round(124e6 / voice.params).toLocaleString() + " times");
   setText("vVocab", voice.vocab);
   setText("vLoss", voice.loss.toFixed(2));
   setText("vCheck", voice.agree + "/" + voice.of + " same");

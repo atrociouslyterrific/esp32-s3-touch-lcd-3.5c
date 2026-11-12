@@ -1,6 +1,6 @@
 """Train Bloop's voice: a tiny GPT-style transformer language model.
 
-Word-level, decoder-only transformer (2 layers, 4 attention heads, 64-wide).
+Word-level, decoder-only transformer (2 layers, 8 attention heads, 256-wide).
 It reads Bloop's feelings + what just happened, then writes a short line.
 Runs on GitHub Actions. Writes:
   bloop_room/voice_weights.h   - 8-bit weights + vocabulary for the board
@@ -37,10 +37,10 @@ def write_status(**kw):
     os.replace(tmp, STATUS)  # never leave a half-written file for the uploader
 
 SEED = 3
-D, H, L, T = 64, 4, 2, 32          # width, heads, layers, context length
+D, H, L, T = 256, 8, 2, 32         # width, heads, layers, context length (was 64 wide, 4 heads)
 FF = 4 * D
 STEPS = int(os.environ.get("BLOOP_VOICE_STEPS", "3000"))
-BATCH, LR = 96, 3e-3
+BATCH, LR = 96, 1e-3                # wider model: lower top learning rate (64-wide used 3e-3)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "training", "out")
@@ -391,7 +391,7 @@ def main():
         words = [VOCAB[i] for i in pr if VOCAB[i] != "<say>"]
         samples.append({"feels": words, "says": detok(np_generate(P, pr, rng=rng, temp=0.8))})
     stats = {"steps": total_steps, "version": version, "test_loss": round(min(new, old) if kept == "old" else new, 4),
-             "kept": kept, "loss": final, "params": nparams, "vocab": V, "agree": agree,
+             "kept": kept, "width": D, "heads": H, "ff": FF, "layers": L, "loss": final, "params": nparams, "vocab": V, "agree": agree,
              "of": len(test_prompts), "seconds": round(time.time() - t0), "samples": samples,
              "curve": [round(float(np.mean(losses[max(0, i - 50):i + 1])), 4) for i in range(0, STEPS, 25)]}
     with open(os.path.join(OUT, "voice_samples.json"), "w") as f:

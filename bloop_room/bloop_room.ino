@@ -347,7 +347,7 @@ void sendSay(const char *who, const char *ev, const char *text, unsigned long us
 }
 
 #if BLOOP_HAS_VOICE
-BloopVoice voiceModel;   // the model's working memory (~33 KB)
+BloopVoice *voiceModel = nullptr;   // the model's working memory (~150 KB, in PSRAM)
 const char *const SAY_NAMES[NUM_SAY] = {
   "idle", "fall", "shake", "eat", "overeat", "kick", "pet", "good", "no", "wake", "sleep",
   "dance", "jump", "hide", "window", "beg", "roll", "grip", "float", "toy",
@@ -365,7 +365,57 @@ const int PIP_TOPIC_TOKENS[NUM_PIP_TOPICS] = {
   BV_TOK_PIP_QUESTION, BV_TOK_PIP_ANY
 };
 float voiceRand() { return (float)(esp_random() >> 8) / 16777216.0f; }
+
+// The voice writes on core 0 in its own task: a line takes the 256-wide model up to
+// about a second, and the room (core 1) keeps animating meanwhile.
+struct VoiceJob { int prompt[12]; int n; uint8_t ev; };
+QueueHandle_t voiceJobs = nullptr;
+volatile bool voiceDone = false, voiceBusy = false;
+char voiceOut[64];
+uint8_t voiceOutEv = 0;
+unsigned long voiceOutUs = 0;
+
+void voiceTask(void *) {
+  VoiceJob j;
+  for (;;) {
+    if (xQueueReceive(voiceJobs, &j, portMAX_DELAY) != pdTRUE) continue;
+    int words[20];
+    uint32_t t0 = micros();
+    int nw = bv_generate(voiceModel, j.prompt, j.n, words, 16, 0.8f, 12, voiceRand);
+    voiceOutUs = micros() - t0;
+    bv_text(words, nw, voiceOut, sizeof(voiceOut));
+    voiceOutEv = j.ev;
+    __sync_synchronize();   // the text is written before the flag says so
+    voiceDone = true;
+  }
+}
+
+bool voiceStart() {
+  if (voiceJobs) return true;
+  if (!voiceModel) voiceModel = (BloopVoice *)heap_caps_malloc(sizeof(BloopVoice), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!voiceModel) voiceModel = (BloopVoice *)malloc(sizeof(BloopVoice));
+  if (!voiceModel) { Serial.println("[voice] not enough memory - Bloop stays quiet"); return false; }
+  voiceJobs = xQueueCreate(1, sizeof(VoiceJob));
+  xTaskCreatePinnedToCore(voiceTask, "voice", 6144, nullptr, 1, nullptr, 0);
+  return true;
+}
 #endif
+
+// Called every loop: shows Bloop's line once the voice task has written it.
+void voicePoll() {
+#if BLOOP_HAS_VOICE
+  if (!voiceDone) return;
+  __sync_synchronize();
+  memcpy(sayText, voiceOut, sizeof(sayText));
+  sayText[sizeof(sayText) - 1] = 0;
+  sayT = 3.5f;
+  sayCount++;
+  sayEventNow = voiceOutEv;
+  sendSay("bloop", SAY_NAMES[voiceOutEv], sayText, voiceOutUs);
+  voiceDone = false;
+  voiceBusy = false;
+#endif
+}
 
 // Bloop says something about `ev`. Important things interrupt; chatter waits its turn.
 void say(uint8_t ev, bool important) {
@@ -373,6 +423,7 @@ void say(uint8_t ev, bool important) {
   if (pet.asleep && ev != SAY_SLEEP) return;
   uint32_t now = millis();
   if (now - lastSayMs < (important ? 1200u : 7000u)) return;
+  if (voiceBusy || !voiceStart()) return;   // still writing the last line
   lastSayMs = now;
   Senses s = sense();
   int prompt[12], n = 0;
@@ -385,15 +436,12 @@ void say(uint8_t ev, bool important) {
   if (ev == SAY_PIP) prompt[n++] = PIP_TOPIC_TOKENS[pipTopic % NUM_PIP_TOPICS];
   prompt[n++] = SAY_TOKENS[ev];
   prompt[n++] = BV_TOK_SAY;
-  int words[20];
-  uint32_t t0 = micros();
-  int nw = bv_generate(&voiceModel, prompt, n, words, 16, 0.8f, 12, voiceRand);
-  unsigned long us = micros() - t0;
-  bv_text(words, nw, sayText, sizeof(sayText));
-  sayT = 3.5f;
-  sayCount++;
-  sayEventNow = ev;
-  sendSay("bloop", SAY_NAMES[ev], sayText, us);
+  VoiceJob j;
+  memcpy(j.prompt, prompt, sizeof(int) * n);
+  j.n = n;
+  j.ev = ev;
+  voiceBusy = true;
+  if (xQueueSend(voiceJobs, &j, 0) != pdTRUE) voiceBusy = false;
 #else
   (void)ev; (void)important;
 #endif
@@ -1830,6 +1878,7 @@ void loop() {
   }
 
   updateWorld(dt);
+  voicePoll();
 
   // Turn Bloop smoothly so its feet point at the floor.
   if (!floating) {
