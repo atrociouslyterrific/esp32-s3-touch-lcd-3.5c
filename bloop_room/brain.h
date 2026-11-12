@@ -12,6 +12,7 @@
 //   - its body: eating when hungry, sleeping when tired, playing (good);
 //     hard landings, overeating, hunger, exhaustion (bad)
 //   - you: petting it and the GOOD button (good), the NO button (bad)
+//   - Pip: when Pip is visiting it praises and scolds Bloop's choices (visitor.h)
 #pragma once
 #include <Preferences.h>
 

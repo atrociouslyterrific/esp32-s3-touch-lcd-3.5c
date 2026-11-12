@@ -8,6 +8,8 @@
 // While Pip is here, Bloop tells Pip so (and how Bloop is doing), and Bloop
 // shows up in Pip's room on Pip's screen too.
 //
+// Pip also trains Bloop while it is here: see visitorCoach().
+//
 // Included from bloop_room.ino after its helpers (it uses pet, ball, bed, cv...).
 #pragma once
 #include <WiFi.h>
@@ -41,6 +43,10 @@ struct Visitor {
   uint8_t action, flags;
   float hopCool, heartCool, bubbleT;
   const char *bubble;
+  uint32_t seenDecisions;   // Bloop's choice count when Pip last looked
+  float coachT;             // counts down to Pip judging Bloop's newest choice
+  float coachCool;          // Pip doesn't comment on everything
+  uint32_t lessons;         // how many times Pip has praised or scolded this visit
 };
 Visitor pip;
 
@@ -103,6 +109,10 @@ void visitorArrive() {
   pip.heartCool = 2.0f;
   pip.bubble = "Hi Bloop!";
   pip.bubbleT = 3.0f;
+  pip.seenDecisions = brain.decisions;
+  pip.coachT = -1;
+  pip.coachCool = 5.0f;   // say hello first, teach after
+  pip.lessons = 0;
   visitorPuff();
   pet.joy = clampf(pet.joy + 15, 0, 100);
   if (!pet.asleep) { snprintf(sayText, sizeof(sayText), "Pip! You came!"); sayT = 3.5f; }
@@ -157,6 +167,68 @@ void visitorRadio(float dt) {
   }
 }
 
+// ---- Pip trains Bloop ----
+// Pip is the older, wiser pet (its brain was trained for days on GitHub), so
+// while it visits it watches what Bloop chooses to do and tells it "Good Bloop!"
+// or "No, Bloop!", just like your GOOD and NO buttons but a little gentler.
+// Bloop's brain learns from Pip's opinion the same way it learns from yours, so
+// time spent with Pip teaches a young Bloop sensible habits much faster.
+//
+// What Pip thinks is sensible: hold on, curl up or hide when the room tips; eat
+// when hungry (and beg if there's no food); sleep when tired; play with the toy
+// when all is well. Silly: dancing or napping while the room tips, ignoring food
+// when hungry, eating or begging when full. Anything else, Pip keeps quiet.
+// Returns +1 (good), -1 (no) or 0 (no opinion).
+int pipOpinion(const Senses &s, Action a) {
+  if (s.room == ROOM_TILTING) {
+    if (a == ACT_GRIP || a == ACT_CURL || a == ACT_HIDE) return 1;
+    if (a == ACT_DANCE || a == ACT_JUMP || a == ACT_SLEEP || a == ACT_WINDOW) return -1;
+    return 0;
+  }
+  if (s.room == ROOM_FLOATING) return 0;   // zero-g: Pip is as confused as Bloop
+  if (s.hungry) {
+    if (s.foodOut) return a == ACT_EAT ? 1 : -1;
+    return a == ACT_BEG ? 1 : 0;
+  }
+  if (a == ACT_EAT || a == ACT_BEG) return -1;   // not hungry: greedy!
+  if (s.tired) return a == ACT_SLEEP ? 1 : ((a == ACT_DANCE || a == ACT_JUMP) ? -1 : 0);
+  if (s.ballNear && a == ACT_BALL) return 1;
+  return 0;
+}
+
+const float PIP_PRAISE = 1.5f;   // your GOOD / NO buttons are worth 2.5
+
+void visitorCoach(float dt) {
+  pip.coachCool -= dt;
+  if (brain.decisions != pip.seenDecisions) {   // Bloop just chose something new
+    pip.seenDecisions = brain.decisions;
+    pip.coachT = 0.7f;                          // watch for a moment, then judge
+  }
+  if (pip.coachT < 0) return;
+  pip.coachT -= dt;
+  if (pip.coachT >= 0) return;
+  // (coachT is now below zero, so each choice is judged once.)
+  if (pip.coachCool > 0 || (pip.flags & PALF_ASLEEP) || pet.asleep || pet.held) return;
+  int verdict = pipOpinion(sense(), pet.action);
+  if (verdict == 0) return;
+
+  pip.coachCool = frand(3.0f, 6.0f);
+  pip.lessons++;
+  rewardAcc += verdict * PIP_PRAISE;   // credited to what Bloop is doing right now
+  if (verdict > 0) {
+    pip.bubble = "Good Bloop!";
+    pet.joy = clampf(pet.joy + 4, 0, 100);
+    for (int k = 0; k < 3; k++)
+      spawnParticle(PT_HEART, pet.body.x, pet.body.y - 10, frand(-50, 50), frand(-90, -30), 1.0f, rgb(255, 90, 140));
+    pip.hopCool = 0;                   // a happy little hop
+  } else {
+    pip.bubble = "No, Bloop!";
+    pet.sadT = 0.8f;
+  }
+  pip.bubbleT = 2.0f;
+  sendEvent(verdict > 0 ? "pip_good" : "pip_no", verdict * PIP_PRAISE);
+}
+
 // Once a frame: the radio, and what Pip gets up to in the room.
 void visitorUpdate(float dt) {
   visitorRadio(dt);
@@ -165,6 +237,7 @@ void visitorUpdate(float dt) {
   pip.hopCool -= dt;
   pip.heartCool -= dt;
   pip.bubbleT -= dt;
+  visitorCoach(dt);
 
   bool asleep = pip.flags & PALF_ASLEEP;
   bool lively = pip.action == PIP_PLAY || pip.action == PIP_DANCE || pip.action == PIP_SING;
