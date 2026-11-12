@@ -91,7 +91,26 @@ float pipNearT = 0, pipFarT = 0, palHopT = 0, palSendT = 0;
 uint8_t palChan = 1;
 const uint8_t PAL_EVERYONE[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
+// Pip's verdict on something Bloop did (see "Pip trains Bloop"), written by the radio task
+volatile bool palVerdictFresh = false;
+volatile uint8_t palVerdictSeq = 0, palVerdictStrength = 0;
+volatile int8_t palVerdict = 0;
+char palVerdictText[24];
+
 void palOnRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  if (len >= 8 && memcmp(data, "PALV", 4) == 0 && data[4] == PAL_PIP) {
+    if (palVerdictFresh) return;   // the game loop hasn't read the last one yet (Pip sends each 3 times)
+    palVerdictSeq = data[5];
+    palVerdict = (int8_t)data[6];
+    palVerdictStrength = data[7];
+    int n = len - 8;
+    if (n > 23) n = 23;
+    if (n < 0) n = 0;
+    memcpy(palVerdictText, data + 8, n);
+    palVerdictText[n] = 0;
+    palVerdictFresh = true;
+    return;
+  }
   if (len >= 8 && memcmp(data, "PALS", 4) == 0 && data[4] == PAL_PIP) {
     int n = len - 7;
     if (n > 57) n = 57;
@@ -311,6 +330,8 @@ void visitorRadio(float dt) {
 // Bloop's brain learns from Pip's opinion the same way it learns from yours, so
 // time spent with Pip teaches a young Bloop sensible habits much faster.
 //
+// (Pip's own board decides when it can: see visitorCoach(). These rules are the
+// stand-in for when Pip doesn't answer.)
 // What Pip thinks is sensible: hold on, curl up or hide when the room tips; eat
 // when hungry (and beg if there's no food); sleep when tired; play, dance or
 // come over when all is well (not nap or hide for no reason); play with the toy
@@ -345,35 +366,98 @@ int pipOpinion(const Senses &s, Action a) {
 
 const float PIP_PRAISE = 1.5f;   // your GOOD / NO buttons are worth 2.5
 
-void visitorCoach(float dt) {
-  pip.coachCool -= dt;
-  if (brain.decisions != pip.seenDecisions) {   // Bloop just chose something new
-    pip.seenDecisions = brain.decisions;
-    pip.coachT = 0.7f;                          // watch for a moment, then judge
-  }
-  if (pip.coachT < 0) return;
-  pip.coachT -= dt;
-  if (pip.coachT >= 0) return;
-  // (coachT is now below zero, so each choice is judged once.)
-  if (pip.coachCool > 0 || (pip.flags & PALF_ASLEEP) || pet.asleep || pet.held) return;
-  int verdict = pipOpinion(sense(), pet.action);
-  if (verdict == 0) return;
+// Bloop asks Pip's own board what it thinks ("PALQ"), and Pip answers ("PALV") with
+// good / no / no opinion, how strongly it feels, and what it says. Pip judges with
+// its own personality: a playful Pip cheers dancing, a lazy one approves of naps, a
+// grumpy one is hard to please. If no answer comes (an older Pip, or a lost message),
+// the rules in pipOpinion() above are used instead.
+struct __attribute__((packed)) PalAsk {
+  uint8_t magic[4];   // "PALQ"
+  uint8_t who;        // PAL_BLOOP
+  uint8_t seq;        // a new number for each question
+  uint8_t action;     // Bloop's Action
+  uint8_t bits;       // 1 hungry, 2 tired, 4 ball near, 8 food out, 16 you're here
+  uint8_t room;       // RoomFeel: 0 calm, 1 tilting, 2 floating
+};
+PalAsk coachAsk;
+Senses coachSenses;
+float coachWait = -1;         // seconds left to wait for Pip's answer (-1 = not waiting)
+int coachResend = 0;
+char coachLine[24] = "";
 
+// Pip's verdict lands: reward or scold what Bloop is doing right now.
+void visitorVerdict(int verdict, float strength, const char *text) {
+  if (verdict == 0) return;
   pip.coachCool = frand(3.0f, 6.0f);
   pip.lessons++;
-  rewardAcc += verdict * PIP_PRAISE;   // credited to what Bloop is doing right now
+  float amount = verdict * PIP_PRAISE * strength;
+  rewardAcc += amount;   // credited to what Bloop is doing right now
+  if (text && text[0]) {
+    snprintf(coachLine, sizeof(coachLine), "%s", text);
+    pip.bubble = coachLine;
+  } else {
+    pip.bubble = verdict > 0 ? "Good Bloop!" : "No, Bloop!";
+  }
   if (verdict > 0) {
-    pip.bubble = "Good Bloop!";
     pet.joy = clampf(pet.joy + 4, 0, 100);
     for (int k = 0; k < 3; k++)
       spawnParticle(PT_HEART, pet.body.x, pet.body.y - 10, frand(-50, 50), frand(-90, -30), 1.0f, rgb(255, 90, 140));
     pip.hopCool = 0;                   // a happy little hop
   } else {
-    pip.bubble = "No, Bloop!";
     pet.sadT = 0.8f;
   }
-  pip.bubbleT = 2.0f;
-  sendEvent(verdict > 0 ? "pip_good" : "pip_no", verdict * PIP_PRAISE);
+  pip.bubbleT = 2.5f;
+  sendEvent(verdict > 0 ? "pip_good" : "pip_no", amount);
+}
+
+void visitorCoach(float dt) {
+  pip.coachCool -= dt;
+  if (brain.decisions != pip.seenDecisions) {   // Bloop just chose something new
+    pip.seenDecisions = brain.decisions;
+    pip.coachT = 0.4f;                          // watch for a moment, then judge
+    coachWait = -1;                             // too late for the previous choice
+  }
+
+  // Waiting for Pip's answer about the current choice.
+  if (coachWait >= 0) {
+    if (coachResend > 0) { coachResend--; esp_now_send(PAL_EVERYONE, (const uint8_t *)&coachAsk, sizeof(coachAsk)); }
+    if (palVerdictFresh) {
+      bool ours = palVerdictSeq == coachAsk.seq;
+      int v = palVerdict;
+      float strength = clampf(palVerdictStrength / 100.0f, 0, 1);
+      char text[24];
+      snprintf(text, sizeof(text), "%s", palVerdictText);
+      palVerdictFresh = false;
+      if (ours) {
+        coachWait = -1;
+        visitorVerdict(v > 0 ? 1 : (v < 0 ? -1 : 0), strength, text);
+        return;
+      }
+    }
+    coachWait -= dt;
+    if (coachWait < 0) visitorVerdict(pipOpinion(coachSenses, pet.action), 1.0f, nullptr);   // no answer: use the rules
+    return;
+  }
+  palVerdictFresh = false;   // a late or repeated answer: ignore it
+
+  if (pip.coachT < 0) return;
+  pip.coachT -= dt;
+  if (pip.coachT >= 0) return;
+  // (coachT is now below zero, so each choice is judged once.)
+  if (pip.coachCool > 0 || (pip.flags & PALF_ASLEEP) || pet.asleep || pet.held) return;
+
+  // Ask Pip.
+  coachSenses = sense();
+  memcpy(coachAsk.magic, "PALQ", 4);
+  coachAsk.who = PAL_BLOOP;
+  coachAsk.seq++;
+  coachAsk.action = (uint8_t)pet.action;
+  coachAsk.bits = (coachSenses.hungry ? 1 : 0) | (coachSenses.tired ? 2 : 0) | (coachSenses.ballNear ? 4 : 0) |
+                  (coachSenses.foodOut ? 8 : 0) | (coachSenses.attention ? 16 : 0);
+  coachAsk.room = (uint8_t)coachSenses.room;
+  esp_now_send(PAL_EVERYONE, (const uint8_t *)&coachAsk, sizeof(coachAsk));
+  coachResend = 2;      // and twice more on the next frames, in case one is lost
+  coachWait = 1.0f;
 }
 
 void bloopPuff() {
@@ -404,6 +488,7 @@ void visitorTakeTurns(float dt) {
     pip.hopCool = 1.5f;
     pip.seenDecisions = brain.decisions;
     pip.coachT = -1;
+    coachWait = -1;
     pip.coachCool = 3.0f;
     visitorPuff();
     bloopPuff();
