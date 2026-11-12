@@ -113,7 +113,8 @@ button:disabled { opacity: 0.4; cursor: default; }
 table.heat { border-collapse: separate; border-spacing: 1px; font-size: 11px; width: 100%; }
 table.heat th { position: sticky; top: 0; background: var(--surface); color: var(--ink-2); font-weight: 600; padding: 4px 2px; z-index: 2; }
 table.heat td.lab { color: var(--ink-2); white-space: nowrap; padding: 0 6px; font-variant-numeric: tabular-nums; }
-table.heat td.cell { height: 14px; min-width: 34px; border-radius: 2px; }
+table.heat td.cell { height: 14px; min-width: 26px; border-radius: 2px; }
+table.heat th { font-size: 10px; line-height: 1.1; }
 table.heat tr.now td.lab { color: var(--ink); font-weight: 700; }
 table.heat tr.now td.cell { outline: 2px solid var(--ink); outline-offset: -1px; }
 .legend { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); margin-top: 8px; }
@@ -183,6 +184,18 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; margin-
       </div>
     </section>
 
+    <section class="card span-12">
+      <h2>How Bloop thinks, live</h2>
+      <p class="note">Bloop's brain is a <b>Q-table</b>, not a neural network: a grid of numbers it fills in itself as it lives. Its senses (left) pick one of 96 situations (middle). That situation's row of the table rates all 14 actions (right). Bloop usually picks the best one, sometimes a random one to learn something new. Line thickness shows how strongly it believes in each action: <span style="color:var(--div-pos);font-weight:650">blue</span> = expects good things, <span style="color:var(--div-neg);font-weight:650">red</span> = expects bad things.</p>
+      <div style="overflow-x:auto"><div class="chart" id="brainDiagram" style="min-width:720px"></div></div>
+    </section>
+
+    <section class="card span-12">
+      <h2>How it learns</h2>
+      <p class="note">This loop repeats every couple of seconds, forever. Each lap nudges one number in the table.</p>
+      <div style="overflow-x:auto"><div class="chart" id="loopDiagram" style="min-width:720px"></div></div>
+    </section>
+
     <section class="card span-8">
       <h2>Is it getting better?</h2>
       <p class="note">Average reward over its last 25 choices. Higher means Bloop is choosing things that work out: eating when hungry, sleeping when tired, not getting hurt, earning your GOOD.</p>
@@ -248,7 +261,9 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; margin-
 <div class="tip" id="tip"></div>
 
 <script>
-const ACTIONS = ["Wander", "Chase ball", "Eat", "Sleep", "Grip wall", "Curl up", "Come to you", "Sit"];
+const ACTIONS = ["Wander", "Chase toy", "Eat", "Sleep", "Grip wall", "Curl up", "Come to you", "Sit",
+  "Dance", "Jump", "Beg for food", "Hide by bed", "Look outside", "Roll around"];
+const NA = ACTIONS.length;
 const ROOMS = ["calm", "tilting", "floating"];
 const NUM_STATES = 96;
 
@@ -433,7 +448,7 @@ function habit(filter) {
   const sum = ACTIONS.map(() => 0); let count = 0;
   for (let s = 0; s < NUM_STATES; s++) {
     if (!filter(decode(s))) continue;
-    for (let a = 0; a < ACTIONS.length; a++) sum[a] += q[s * 8 + a];
+    for (let a = 0; a < NA; a++) sum[a] += q[s * NA + a];
     count++;
   }
   let b = 0; for (let a = 1; a < ACTIONS.length; a++) if (sum[a] > sum[b]) b = a;
@@ -491,8 +506,8 @@ function drawHeat() {
     const lab = document.createElement("td"); lab.className = "lab"; lab.textContent = shortLabel(s);
     lab.title = describe(s);
     tr.appendChild(lab);
-    for (let a = 0; a < 8; a++) {
-      const v = q[s * 8 + a];
+    for (let a = 0; a < NA; a++) {
+      const v = q[s * NA + a];
       const td = document.createElement("td"); td.className = "cell";
       const t = Math.min(1, Math.abs(v) / span);
       td.style.background = v >= 0 ? mix(mid, pos, t) : mix(mid, neg, t);
@@ -545,7 +560,117 @@ function drawLog() {
   });
 }
 
-function redrawAll() { drawRewardChart(); drawNow(); drawMix(); drawHabits(); drawHeat(); drawRecent(); drawLog(); }
+// ---------- brain diagrams ----------
+function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+function svgText(parent, x, y, str, attrs) {
+  const t = el("text", Object.assign({ x, y, "font-size": 13, fill: cssVar("--ink") }, attrs || {}), parent);
+  t.textContent = str;
+  return t;
+}
+
+function drawBrainDiagram() {
+  const box = document.getElementById("brainDiagram");
+  box.replaceChildren();
+  const W = 980, H = 500;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Diagram of Bloop's brain: senses, situation, and how it rates each action" }, box);
+  const ink = cssVar("--ink"), ink2 = cssVar("--ink-2"), muted = cssVar("--muted"), grid = cssVar("--grid");
+  const surface = cssVar("--surface"), accent = cssVar("--series-1"), pos = cssVar("--div-pos"), neg = cssVar("--div-neg"), border = cssVar("--axis");
+
+  const live = !!last;
+  const st = live ? last.s : 0;
+  const s = decode(st);
+  const row = q ? q.slice(st * NA, st * NA + NA) : new Array(NA).fill(0);
+  let span = 0.5; row.forEach(v => span = Math.max(span, Math.abs(v)));
+  const chosen = live ? last.a : -1;
+
+  // Column headings
+  svgText(svg, 20, 22, "1. What it senses", { "font-weight": 650, fill: ink2 });
+  svgText(svg, 330, 22, "2. Which situation", { "font-weight": 650, fill: ink2 });
+  svgText(svg, 640, 22, "3. How good each action looks here", { "font-weight": 650, fill: ink2 });
+
+  // Senses
+  const senses = [
+    ["Hungry?", s.hungry ? "yes" : "no", s.hungry],
+    ["Tired?", s.tired ? "yes" : "no", s.tired],
+    ["Room", ["calm", "tilting!", "zero-g"][s.room], s.room !== 0],
+    ["Toy nearby?", s.ball ? "yes" : "no", s.ball],
+    ["Food out?", s.food ? "yes" : "no", s.food],
+    ["You there?", s.attention ? "yes" : "no", s.attention],
+  ];
+  const sy = i => 50 + i * 72;
+  const sitX = 330, sitY = 190, sitW = 230, sitH = 130;
+  senses.forEach(([name, val, on], i) => {
+    const y = sy(i);
+    const lit = live && on;
+    el("path", { d: `M220,${y + 20} C275,${y + 20} 275,${sitY + sitH / 2} ${sitX},${sitY + sitH / 2}`, fill: "none",
+      stroke: lit ? accent : grid, "stroke-width": lit ? 2.5 : 1.5 }, svg);
+    el("rect", { x: 20, y, width: 200, height: 40, rx: 20, fill: lit ? accent : surface, stroke: lit ? accent : border, "stroke-width": 1.5 }, svg);
+    svgText(svg, 38, y + 25, name, { fill: lit ? "#fff" : ink });
+    svgText(svg, 204, y + 25, live ? val : "?", { "text-anchor": "end", "font-weight": 650, fill: lit ? "#fff" : ink2 });
+  });
+
+  // Situation box
+  el("rect", { x: sitX, y: sitY, width: sitW, height: sitH, rx: 14, fill: surface, stroke: ink, "stroke-width": 2 }, svg);
+  svgText(svg, sitX + sitW / 2, sitY + 30, "Situation", { "text-anchor": "middle", fill: ink2 });
+  svgText(svg, sitX + sitW / 2, sitY + 66, live ? "#" + st : "#?", { "text-anchor": "middle", "font-size": 30, "font-weight": 700 });
+  svgText(svg, sitX + sitW / 2, sitY + 92, "one of 96", { "text-anchor": "middle", fill: muted, "font-size": 12 });
+  svgText(svg, sitX + sitW / 2, sitY + 114, live ? "row " + st + " of the table" : "connect to see it live", { "text-anchor": "middle", fill: muted, "font-size": 12 });
+
+  // Actions
+  const ay = i => 40 + i * 32;
+  const ax = 640, aw = 320;
+  row.forEach((v, i) => {
+    const y = ay(i);
+    const t = Math.min(1, Math.abs(v) / span);
+    const isChosen = i === chosen;
+    el("path", { d: `M${sitX + sitW},${sitY + sitH / 2} C${sitX + sitW + 45},${sitY + sitH / 2} ${ax - 45},${y + 13} ${ax},${y + 13}`,
+      fill: "none", stroke: Math.abs(v) < 0.01 ? grid : (v >= 0 ? pos : neg), "stroke-width": isChosen ? 4 : 1 + 4 * t,
+      "stroke-opacity": Math.abs(v) < 0.01 ? 1 : 0.3 + 0.7 * t }, svg);
+    el("rect", { x: ax, y, width: aw, height: 26, rx: 8, fill: surface, stroke: isChosen ? ink : border, "stroke-width": isChosen ? 2.5 : 1 }, svg);
+    svgText(svg, ax + 12, y + 18, ACTIONS[i], { "font-weight": isChosen ? 700 : 400, "font-size": 12.5 });
+    // Bar: zero line in the middle of the bar area
+    const bx0 = ax + 130, bw = 120, mid = bx0 + bw / 2;
+    el("line", { x1: mid, x2: mid, y1: y + 5, y2: y + 21, stroke: border, "stroke-width": 1 }, svg);
+    const len = t * bw / 2;
+    if (Math.abs(v) >= 0.01) el("rect", { x: v >= 0 ? mid : mid - len, y: y + 8, width: Math.max(len, 1), height: 10, rx: 2, fill: v >= 0 ? pos : neg }, svg);
+    svgText(svg, ax + aw - 10, y + 18, (v >= 0 ? "+" : "") + v.toFixed(2), { "text-anchor": "end", "font-size": 12, fill: ink2, "font-variant-numeric": "tabular-nums" });
+    if (isChosen) svgText(svg, ax - 8, y + 18, last.x ? "random try ▸" : "chosen ▸", { "text-anchor": "end", "font-size": 11, "font-weight": 650 });
+  });
+}
+
+function drawLoopDiagram() {
+  const box = document.getElementById("loopDiagram");
+  box.replaceChildren();
+  const W = 980, H = 210;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Bloop's learning loop: sense, choose, act, reward, learn" }, box);
+  const ink = cssVar("--ink"), ink2 = cssVar("--ink-2"), surface = cssVar("--surface"), border = cssVar("--axis"), accent = cssVar("--series-1");
+  const r = last ? last.r : null;
+  const eps = last ? Math.round(last.eps * 100) : null;
+  const steps = [
+    ["1  Sense", ["hungry? tired? room tilting?", "toy, food, you nearby?"]],
+    ["2  Choose", ["best action in this row,", eps === null ? "or a random one sometimes" : "or random " + eps + "% of the time"]],
+    ["3  Act", ["walk, eat, sleep, grip,", "dance, hide…"]],
+    ["4  Reward", ["+ food when hungry, sleep, GOOD", "− falls, shaking, NO, hunger"]],
+    ["5  Learn", ["Q ← Q + 0.25 × (reward +", "0.8 × best next − Q)"]],
+  ];
+  const bw = 172, gap = 20, x0 = 12, y = 30, bh = 100;
+  el("defs", {}, svg).innerHTML = `<marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${border}"/></marker>`;
+  steps.forEach(([title, lines], i) => {
+    const x = x0 + i * (bw + gap);
+    const hot = i === 3 && r !== null;
+    el("rect", { x, y, width: bw, height: bh, rx: 12, fill: surface, stroke: i === 4 ? accent : border, "stroke-width": i === 4 ? 2 : 1.5 }, svg);
+    svgText(svg, x + 12, y + 26, title, { "font-weight": 700, "font-size": 14 });
+    lines.forEach((l, k) => svgText(svg, x + 12, y + 52 + k * 18, l, { "font-size": 11.5, fill: ink2 }));
+    if (hot) svgText(svg, x + bw - 10, y + 26, (r >= 0 ? "+" : "") + r.toFixed(2), { "text-anchor": "end", "font-weight": 700, "font-size": 13, fill: ink });
+    if (i < steps.length - 1) el("line", { x1: x + bw + 2, y1: y + bh / 2, x2: x + bw + gap - 3, y2: y + bh / 2, stroke: border, "stroke-width": 2, "marker-end": "url(#arr)" }, svg);
+  });
+  // Return arrow: Learn -> Sense
+  const xr = x0 + 4 * (bw + gap) + bw / 2, xl = x0 + bw / 2;
+  el("path", { d: `M${xr},${y + bh + 2} C${xr},${y + bh + 55} ${xl},${y + bh + 55} ${xl},${y + bh + 6}`, fill: "none", stroke: border, "stroke-width": 2, "stroke-dasharray": "5 5", "marker-end": "url(#arr)" }, svg);
+  svgText(svg, (xl + xr) / 2, y + bh + 62, "…then sense again, with one number in the table nudged", { "text-anchor": "middle", "font-size": 12, fill: ink2 });
+}
+
+function redrawAll() { drawBrainDiagram(); drawLoopDiagram(); drawRewardChart(); drawNow(); drawMix(); drawHabits(); drawHeat(); drawRecent(); drawLog(); }
 
 // ---------- data in ----------
 let drawQueued = false;
@@ -578,7 +703,7 @@ function handleLine(line) {
     history.push({ n: m.n, s: m.s, a: m.a, r: m.r, x: m.x });
     if (history.length > 3000) history = history.slice(-3000);
     if (history.length % 10 === 0) saveHistory();
-  } else if (m.t === "q" && Array.isArray(m.q) && m.q.length === NUM_STATES * 8) {
+  } else if (m.t === "q" && Array.isArray(m.q) && m.q.length === NUM_STATES * NA) {
     q = m.q;
   } else if (m.t === "ev") {
     events.push({ e: m.e, v: m.v, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) });
