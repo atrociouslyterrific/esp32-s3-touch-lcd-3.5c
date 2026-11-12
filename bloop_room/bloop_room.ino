@@ -49,7 +49,7 @@ TouchDrvFT6X36 touch;
 SensorQMI8658 imu;
 Preferences prefs;
 Arduino_DataBus *bus = new Arduino_ESP32SPI(LCD_DC, -1, SPI_SCLK, SPI_MOSI, SPI_MISO);
-Arduino_GFX *lcd = new Arduino_ST7796(bus, -1, 0, true, SCREEN_W, SCREEN_H);
+Arduino_ST7796 *lcd = new Arduino_ST7796(bus, -1, 0, true, SCREEN_W, SCREEN_H);
 Arduino_Canvas *cv = new Arduino_Canvas(SCREEN_W, SCREEN_H, lcd, 0, 0, 0);
 bool imuOk = false, touchOk = false;
 
@@ -1182,10 +1182,12 @@ void setup() {
   Serial.setTxTimeoutMs(0);   // never stall the game when no computer is listening
   boardSt = boardPowerUp(expander, pmu);
 
-  screenOk = cv->begin(LCD_SPI_HZ);
-  if (!screenOk) {
+  // SPI mode 0, like Waveshare's firmware. (GFX Library 1.6+ defaults the ST7796
+  // to mode 3, which this board's screen ignores: the screen stays black.)
+  bool lcdOk = lcd->begin(LCD_SPI_HZ, SPI_MODE0);
+  screenOk = lcdOk && cv->begin(GFX_SKIP_OUTPUT_BEGIN);
+  if (lcdOk && !screenOk) {
     // No framebuffer (usually PSRAM missing): say so on the screen directly.
-    lcd->begin(LCD_SPI_HZ);
     lcd->fillScreen(RGB565_BLACK);
     lcd->setTextColor(RGB565_RED);
     lcd->setTextSize(2);

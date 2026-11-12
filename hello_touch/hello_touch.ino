@@ -23,7 +23,7 @@ BoardStatus boardSt;
 TouchDrvFT6X36 touch;
 
 Arduino_DataBus *bus = new Arduino_ESP32SPI(LCD_DC, LCD_CS, SPI_SCLK, SPI_MOSI, SPI_MISO);
-Arduino_GFX *gfx = new Arduino_ST7796(bus, LCD_RST, 0 /* rotation */, true /* IPS */, LCD_W, LCD_H);
+Arduino_ST7796 *gfx = new Arduino_ST7796(bus, LCD_RST, 0 /* rotation */, true /* IPS */, LCD_W, LCD_H);
 
 // ---- Layout ----
 const int HEADER_H = 70;            // title + touch readout
@@ -117,7 +117,8 @@ void setup() {
   Serial.setTxTimeoutMs(0);
   boardSt = boardPowerUp(expander, pmu);
 
-  bool screenOk = gfx->begin(40000000);
+  // SPI mode 0, like Waveshare's firmware (GFX Library 1.6+ defaults to mode 3: black screen).
+  bool screenOk = gfx->begin(40000000, SPI_MODE0);
   drawScreen();
   boardBacklight(true);
 
