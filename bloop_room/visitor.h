@@ -65,6 +65,18 @@ struct Visitor {
 };
 Visitor pip;
 
+uint32_t pipLessonsTotal = 0;   // every "Good Bloop!" / "No, Bloop!" Pip has ever given (saved on the board)
+uint32_t pipLessonsSaved = 0;   // the count that is in the board's memory right now
+float pipLessonsSaveT = 0;
+
+// Save the lesson count if it has changed. (Not after every single lesson: the
+// board's memory wears out if it is written every few seconds.)
+void visitorSaveLessons() {
+  if (pipLessonsTotal == pipLessonsSaved) return;
+  prefs.putUInt("pipLessons", pipLessonsTotal);
+  pipLessonsSaved = pipLessonsTotal;
+}
+
 // While the boards are together the two pets share ONE room at a time: a pet that
 // leaves its own room turns up in the other's. They start in Bloop's room, then
 // take turns: Bloop goes over to Pip's (and this screen shows its room empty),
@@ -219,6 +231,7 @@ void visitorTalk(float dt) {
 // Switch the radio on (it never joins a network, it only listens for Pip).
 void visitorBegin() {
   pip.here = false;
+  pipLessonsTotal = pipLessonsSaved = prefs.getUInt("pipLessons", 0);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   if (esp_now_init() != ESP_OK) return;
@@ -270,6 +283,7 @@ void visitorArrive() {
 
 void visitorLeave() {
   if (palPlace == PLACE_BLOOPS) visitorPuff();
+  visitorSaveLessons();
   pip.here = false;
   palPlace = PLACE_BLOOPS;   // Bloop is back in its own room
   for (int i = 0; i < 3; i++) palSend(false);
@@ -379,7 +393,6 @@ struct __attribute__((packed)) PalAsk {
   uint8_t bits;       // 1 hungry, 2 tired, 4 ball near, 8 food out, 16 you're here
   uint8_t room;       // RoomFeel: 0 calm, 1 tilting, 2 floating
 };
-uint32_t pipLessonsTotal = 0;   // every "Good Bloop!" / "No, Bloop!" since the board was switched on
 PalAsk coachAsk;
 Senses coachSenses;
 float coachWait = -1;         // seconds left to wait for Pip's answer (-1 = not waiting)
@@ -505,6 +518,8 @@ void visitorTakeTurns(float dt) {
 // Once a frame: the radio, and what Pip gets up to in the room.
 void visitorUpdate(float dt) {
   visitorRadio(dt);
+  pipLessonsSaveT += dt;
+  if (pipLessonsSaveT > 30) { pipLessonsSaveT = 0; visitorSaveLessons(); }   // at most every 30 s
   if (!pip.here) return;
   visitorTakeTurns(dt);
   if (palPlace == PLACE_PIPS) {   // both are over at Pip's: only the chatting carries on here
