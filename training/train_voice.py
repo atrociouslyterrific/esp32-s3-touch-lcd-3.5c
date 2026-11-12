@@ -309,7 +309,9 @@ def main():
                 # New words were added (or some removed): keep everything learned, and copy each
                 # known word's embedding to its new place. New words start from small random values.
                 sd = dict(ck["model"])
-                old_tok, new_tok = sd.pop("tok.weight"), model.tok.weight.detach().clone()
+                old_tok = sd.pop("tok.weight")
+                # New words start small (like the learned ones), so they don't drown out known words.
+                new_tok = torch.randn(V, D) * old_tok.std() * 0.5
                 where = {w: i for i, w in enumerate(ck["vocab"])}
                 kept_words = 0
                 for i, w in enumerate(VOCAB):
