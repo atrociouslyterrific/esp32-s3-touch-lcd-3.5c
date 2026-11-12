@@ -281,10 +281,11 @@ def main():
     # Check the 8-bit numpy model agrees with PyTorch on a few prompts.
     test_prompts = []
     prng = __import__("random").Random(99)
-    for _ in range(24):
+    for _ in range(32):
         f, flags = VC.sample_feelings(prng)
         ev = prng.choice(VC.EVENTS)
-        test_prompts.append(encode(VC.prompt_tokens(f, flags, ev)))
+        topic = prng.choice(VC.PIP_TOPICS) if ev == "pip" else None
+        test_prompts.append(encode(VC.prompt_tokens(f, flags, ev, topic)))
     agree = 0
     with torch.no_grad():
         for pr in test_prompts:

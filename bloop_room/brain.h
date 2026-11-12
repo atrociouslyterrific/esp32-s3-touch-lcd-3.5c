@@ -35,8 +35,12 @@ const char *const ACTION_THOUGHTS[NUM_ACTIONS] = {
 enum SayEvent : uint8_t {
   SAY_IDLE, SAY_FALL, SAY_SHAKE, SAY_EAT, SAY_OVEREAT, SAY_KICK, SAY_PET, SAY_GOOD, SAY_NO,
   SAY_WAKE, SAY_SLEEP, SAY_DANCE, SAY_JUMP, SAY_HIDE, SAY_WINDOW, SAY_BEG, SAY_ROLL, SAY_GRIP,
-  SAY_FLOAT, SAY_TOY, NUM_SAY
+  SAY_FLOAT, SAY_TOY,
+  SAY_VISIT, SAY_PIP, SAY_CHAT, SAY_BYE,   // talking with Pip (see visitor.h)
+  NUM_SAY
 };
+// What Pip just said, sorted into a topic (same order as PIP_TOPICS in voice_corpus.py).
+enum PipTopic : uint8_t { PT_FOOD_TALK, PT_SLEEP_TALK, PT_PLAY_TALK, PT_WEATHER_TALK, PT_LOVE_TALK, PT_QUESTION, PT_ANY_TALK, NUM_PIP_TOPICS };
 
 // The situation is built from 6 yes/no-ish features:
 //   hungry (2) x tired (2) x room (calm / tilting / floating = 3)

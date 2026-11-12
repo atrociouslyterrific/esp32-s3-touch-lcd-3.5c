@@ -215,7 +215,7 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; margin-
     </section>
 
     <section class="card span-6">
-      <h2>What Bloop says</h2>
+      <h2>What Bloop says (and Pip, when it visits)</h2>
       <p class="note" id="sayNote">Live from the board once connected. Until then, lines the model wrote while it was being tested on GitHub.</p>
       <ul class="log" id="sayLog"></ul>
     </section>
@@ -786,7 +786,9 @@ function drawSayLog() {
     const li = document.createElement("li");
     const t = document.createElement("span"); t.className = "t"; t.textContent = r.time;
     const ev = document.createElement("span"); ev.style.color = "var(--muted)"; ev.style.minWidth = "56px"; ev.textContent = r.ev;
-    const tx = document.createElement("span"); tx.className = "tag"; tx.textContent = "“" + r.text + "”";
+    const tx = document.createElement("span"); tx.className = "tag";
+    tx.textContent = (r.who === "pip" ? "Pip: " : "") + "“" + r.text + "”";
+    if (r.who === "pip") tx.style.color = "var(--ink-2)";
     li.append(t, ev, tx); ul.appendChild(li);
   });
 }
@@ -828,9 +830,9 @@ function handleLine(line) {
     q = m.q;
   } else if (m.t === "say") {
     const feels = last ? describe(last.s).split(", ") : null;
-    sayings.push({ text: m.text, ev: m.ev, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), feels: null });
+    sayings.push({ text: m.text, ev: m.ev, who: m.who || "bloop", time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), feels: null });
     if (sayings.length > 200) sayings = sayings.slice(-200);
-    setText("sayNote", "Live from the board. Each line took the board " + (m.us / 1000).toFixed(0) + " ms to write.");
+    if (m.who !== "pip") setText("sayNote", "Live from the board. Bloop's last line took the board " + (m.us / 1000).toFixed(0) + " ms to write.");
   } else if (m.t === "ev") {
     events.push({ e: m.e, v: m.v, time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) });
     if (events.length > 200) events = events.slice(-200);

@@ -23,7 +23,12 @@ EVENTS = [
     "idle", "fall", "shake", "eat", "overeat", "kick", "pet", "good", "no",
     "wake", "sleep", "dance", "jump", "hide", "window", "beg", "roll", "grip",
     "float", "toy",
+    # Talking with Pip, the pet from the other board, while it visits
+    "visit", "pip", "chat", "bye",
 ]
+
+# What Pip just said, sorted into a topic on the board (see visitor.h).
+PIP_TOPICS = ["food", "sleep", "play", "weather", "love", "question", "any"]
 
 # ---- What Bloop says about the event ----
 EVENT_LINES = {
@@ -105,9 +110,39 @@ EVENT_LINES = {
         "i am floating !", "zero gravity !", "wheee , space !", "no up , no down !",
         "i can fly !", "where is the floor ?",
     ],
+    "visit": [
+        "pip ! you came !", "hi pip !", "welcome to my room , pip !", "yay , pip is here !",
+        "pip , come in !", "my friend pip is here !",
+    ],
+    "chat": [
+        "pip , look at me !", "pip , want to play ?", "pip , what do you do all day ?", "hey pip !",
+        "pip , my room tilts sometimes .", "pip , do you like my bed ?", "pip , guess what ?",
+        "pip , i learned a new trick !",
+    ],
+    "bye": [
+        "bye , pip !", "come back soon , pip !", "see you later , pip .", "aww , pip left .",
+        "bye bye , friend !",
+    ],
     "toy": [
         "my toy !", "toy time !", "come here , toy !", "i love my toy .", "play with me !",
     ],
+}
+
+# ---- Bloop answering Pip, by what Pip talked about ----
+PIP_REPLIES = {
+    "food": ["snacks are the best , pip !", "i am hungry too !", "let us eat together !",
+             "you like food like me !", "yum , food talk !"],
+    "sleep": ["naps are cozy .", "you can sleep in my bed , pip .", "shh , pip is sleepy .",
+              "i like naps too .", "my bed is soft , pip ."],
+    "play": ["let us play , pip !", "dance with me , pip !", "you sing so well , pip !",
+             "play time !", "you are fun , pip !"],
+    "weather": ["it is always nice in my room .", "brr , is it cold , pip ?", "i never see the sun in here .",
+                "is it warm where you live ?"],
+    "love": ["you are my best friend , pip !", "i love you too , pip !", "hug !", "pip is the best ."],
+    "question": ["hmm , i do not know , pip .", "yes , pip !", "maybe ?", "good question , pip !",
+                 "let me think ..."],
+    "any": ["really , pip ?", "me too , pip !", "haha , pip is funny .", "tell me more , pip .",
+            "wow !", "okay , pip !"],
 }
 
 # ---- Extra bits about how Bloop feels (added sometimes) ----
@@ -131,14 +166,18 @@ def sample_feelings(rng):
     return f, flags
 
 
-def prompt_tokens(f, flags, event):
+def prompt_tokens(f, flags, event, topic=None):
     toks = [f"hunger:{f['hunger']}", f"energy:{f['energy']}", f"mood:{f['mood']}", f"room:{f['room']}"]
     toks += flags
+    if event == "pip":
+        toks.append(f"pip:{topic or 'any'}")
     toks += [f"event:{event}", "<say>"]
     return toks
 
 
-def make_line(rng, f, flags, event):
+def make_line(rng, f, flags, event, topic=None):
+    if event == "pip":
+        return rng.choice(PIP_REPLIES[topic]).split()   # answer Pip, don't change the subject
     words = rng.choice(EVENT_LINES[event]).split()
     # Sometimes add a second part about how Bloop feels, but only true feelings.
     options = [(k, v) for k, v in f.items() if (k, v) in FEELING_LINES]
@@ -148,7 +187,8 @@ def make_line(rng, f, flags, event):
         options = [o for o in options if o != ("room", "float")]
     if event == "beg":
         options = [o for o in options if o != ("hunger", "hungry")]
-    if options and rng.random() < 0.55:
+    chance = 0.8 if event == "chat" else 0.55   # chatting: tell Pip how you are
+    if options and rng.random() < chance:
         k = rng.choice(options)
         extra = rng.choice(FEELING_LINES[k]).split()
         c = rng.choice(CONNECT)
@@ -177,17 +217,19 @@ def make_example(rng):
     if event == "pet":
         if "you" not in flags:
             flags.append("you")
-    return prompt_tokens(f, flags, event) + make_line(rng, f, flags, event) + ["<end>"]
+    topic = rng.choice(PIP_TOPICS) if event == "pip" else None
+    return prompt_tokens(f, flags, event, topic) + make_line(rng, f, flags, event, topic) + ["<end>"]
 
 
 def build_vocab():
     words = set()
-    for lines in list(EVENT_LINES.values()) + list(FEELING_LINES.values()):
+    for lines in list(EVENT_LINES.values()) + list(FEELING_LINES.values()) + list(PIP_REPLIES.values()):
         for line in lines:
             words.update(line.split())
     words.update(c for c in CONNECT if c)
     specials = ["<end>", "<say>"]
     prompt = [f"{k}:{v}" for k, vs in FEELINGS.items() for v in vs] + FLAGS + [f"event:{e}" for e in EVENTS]
+    prompt += [f"pip:{t}" for t in PIP_TOPICS]
     return specials + prompt + sorted(words)
 
 

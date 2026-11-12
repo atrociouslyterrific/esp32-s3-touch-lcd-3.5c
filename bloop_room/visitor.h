@@ -10,6 +10,12 @@
 //
 // Pip also trains Bloop while it is here: see visitorCoach().
 //
+// And they talk. Every line Bloop says (from its language model, voice.h) goes to
+// Pip in a "PALS" message; Pip answers each one with a line from its own voice
+// model. Bloop sorts Pip's answer into a topic (food, sleep, play, weather, love,
+// a question, anything else) and replies about it, at most twice per chat so the
+// two don't talk forever. Every 25-40 s Bloop starts a new chat.
+//
 // Included from bloop_room.ino after its helpers (it uses pet, ball, bed, cv...).
 #pragma once
 #include <WiFi.h>
@@ -25,6 +31,15 @@ struct __attribute__((packed)) PalMsg {
   uint8_t hosting;    // Bloop: 1 while Pip is in Bloop's room
 };
 enum : uint8_t { PAL_PIP = 1, PAL_BLOOP = 2 };
+
+// A spoken line. Must match the copy in PipAI.ino.
+struct __attribute__((packed)) PalSay {
+  uint8_t magic[4];   // "PALS"
+  uint8_t who;        // PAL_PIP or PAL_BLOOP
+  uint8_t seq;        // the sender's line number (goes up by 1 each line, wraps at 255)
+  uint8_t replyTo;    // the other pet's line this answers (0 = starts a new topic)
+  char text[58];      // what was said, ending in a 0 byte
+};
 enum : uint8_t { PALF_SAD = 1, PALF_ASLEEP = 2 };
 // Pip's actions, in the order of PipAction in pip_world.h
 enum : uint8_t { PIP_IDLE, PIP_NAP, PIP_EAT, PIP_EXPLORE, PIP_PLAY, PIP_SING, PIP_HIDE,
@@ -56,6 +71,11 @@ volatile int8_t palLastRssi = -127;
 volatile uint8_t palAction = 0, palFlags = 0;
 volatile bool palFresh = false;
 
+// Pip's latest line, written by the radio task
+volatile bool palSayFresh = false;
+volatile uint8_t palSayReplyTo = 0;
+char palSayBuf[58];
+
 bool palOk = false;
 float pipRssi = -127;          // smoothed signal strength
 float pipNearT = 0, pipFarT = 0, palHopT = 0, palSendT = 0;
@@ -63,6 +83,15 @@ uint8_t palChan = 1;
 const uint8_t PAL_EVERYONE[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 void palOnRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  if (len >= 8 && memcmp(data, "PALS", 4) == 0 && data[4] == PAL_PIP) {
+    int n = len - 7;
+    if (n > 57) n = 57;
+    memcpy(palSayBuf, data + 7, n);
+    palSayBuf[n] = 0;
+    palSayReplyTo = data[6];
+    palSayFresh = true;
+    return;
+  }
   if (len < (int)sizeof(PalMsg) || memcmp(data, "PAL1", 4) != 0 || data[4] != PAL_PIP) return;
   palAction = data[5];
   palFlags = data[6];
@@ -75,6 +104,75 @@ void palSend(bool hosting) {
   uint8_t flags = (pet.asleep ? PALF_ASLEEP : 0) | ((pet.joy < 25 || pet.sadT > 0 || pet.hurtT > 0) ? PALF_SAD : 0);
   PalMsg m = {{'P', 'A', 'L', '1'}, PAL_BLOOP, (uint8_t)pet.action, flags, (uint8_t)(hosting ? 1 : 0)};
   esp_now_send(PAL_EVERYONE, (const uint8_t *)&m, sizeof(m));
+}
+
+// ---- Talking ----
+uint8_t palSaySeq = 0;        // our latest line number
+uint32_t palSaidCount = 0;    // sayCount when we last sent
+int chatReplies = 0;          // Bloop's replies in the current chat
+float chatT = 0;              // until Bloop starts a new chat
+float replyT = -1;            // until Bloop answers Pip
+char pipLine[58] = "";
+
+void palSendSay(const char *text, uint8_t replyTo) {
+  PalSay m = {};
+  memcpy(m.magic, "PALS", 4);
+  m.who = PAL_BLOOP;
+  m.seq = ++palSaySeq;
+  if (m.seq == 0) m.seq = ++palSaySeq;   // 0 means "no line"
+  m.replyTo = replyTo;
+  strncpy(m.text, text, sizeof(m.text) - 1);
+  for (int i = 0; i < 2; i++) esp_now_send(PAL_EVERYONE, (const uint8_t *)&m, 7 + strlen(m.text) + 1);
+}
+
+// Sort what Pip said into a topic Bloop's voice knows how to answer.
+uint8_t pipTopicOf(const char *line) {
+  char low[58];
+  int i = 0;
+  for (; line[i] && i < 57; i++) low[i] = tolower((unsigned char)line[i]);
+  low[i] = 0;
+  auto has = [&](const char *w) { return strstr(low, w) != nullptr; };
+  if (has("food") || has("snack") || has("eat") || has("hungry") || has("yum") || has("crumb")) return PT_FOOD_TALK;
+  if (has("sleep") || has("nap") || has("tired") || has("yawn") || has("zzz") || has("bed") || has("dream")) return PT_SLEEP_TALK;
+  if (has("play") || has("dance") || has("sing") || has("fun") || has("game") || has("jump") || has("la la")) return PT_PLAY_TALK;
+  if (has("cold") || has("warm") || has("hot") || has("sun") || has("rain") || has("weather") || has("chilly")) return PT_WEATHER_TALK;
+  if (has("love") || has("friend") || has("like you") || has("hug") || has("<3")) return PT_LOVE_TALK;
+  if (has("?")) return PT_QUESTION;
+  return PT_ANY_TALK;
+}
+
+void visitorTalk(float dt) {
+  // Anything Bloop just said goes to Pip.
+  if (sayCount != palSaidCount) {
+    palSaidCount = sayCount;
+    if (sayEventNow != SAY_PIP) chatReplies = 0;   // Bloop changed the subject
+    palSendSay(sayText, 0);
+  }
+  // Pip said something.
+  if (palSayFresh) {
+    palSayFresh = false;
+    strncpy(pipLine, palSayBuf, sizeof(pipLine) - 1);
+    pipLine[sizeof(pipLine) - 1] = 0;
+    pip.bubble = pipLine;
+    pip.bubbleT = 4.5f;
+    sendSay("pip", "pip", pipLine, 0);
+    pipTopic = pipTopicOf(pipLine);
+    bool answersUs = palSayReplyTo == palSaySeq;
+    if (answersUs && chatReplies < 2 && !pet.asleep) replyT = frand(1.6f, 2.6f);
+  }
+  if (replyT >= 0) {
+    replyT -= dt;
+    if (replyT < 0 && !pet.asleep) {
+      chatReplies++;
+      say(SAY_PIP, true);
+    }
+  }
+  // Now and then, Bloop starts a new chat.
+  chatT -= dt;
+  if (chatT <= 0) {
+    chatT = frand(25, 40);
+    if (!pet.asleep && !(pip.flags & PALF_ASLEEP)) say(SAY_CHAT, true);
+  }
 }
 
 // Switch the radio on (it never joins a network, it only listens for Pip).
@@ -115,7 +213,15 @@ void visitorArrive() {
   pip.lessons = 0;
   visitorPuff();
   pet.joy = clampf(pet.joy + 15, 0, 100);
+  chatT = frand(20, 30);
+  replyT = -1;
+  chatReplies = 0;
+  palSaidCount = sayCount;
+  lastSayMs = 0;   // greet Pip right away
+  say(SAY_VISIT, true);
+#if !BLOOP_HAS_VOICE
   if (!pet.asleep) { snprintf(sayText, sizeof(sayText), "Pip! You came!"); sayT = 3.5f; }
+#endif
   sendEvent("pip_in", pipRssi);
 }
 
@@ -123,7 +229,13 @@ void visitorLeave() {
   visitorPuff();
   pip.here = false;
   for (int i = 0; i < 3; i++) palSend(false);
+  lastSayMs = 0;
+  say(SAY_BYE, true);
+#if BLOOP_HAS_VOICE
+  palSaidCount = sayCount;   // Pip has gone; don't send the goodbye later
+#else
   if (!pet.asleep) { snprintf(sayText, sizeof(sayText), "Bye, Pip!"); sayT = 3.0f; }
+#endif
   sendEvent("pip_out", pipRssi);
 }
 
@@ -238,6 +350,7 @@ void visitorUpdate(float dt) {
   pip.heartCool -= dt;
   pip.bubbleT -= dt;
   visitorCoach(dt);
+  visitorTalk(dt);
 
   bool asleep = pip.flags & PALF_ASLEEP;
   bool lively = pip.action == PIP_PLAY || pip.action == PIP_DANCE || pip.action == PIP_SING;
@@ -332,18 +445,5 @@ void drawVisitor() {
     line(look - 5, 5, look - 2, 7, ink); line(look - 2, 7, look + 2, 7, ink); line(look + 2, 7, look + 5, 5, ink);
   }
 
-  if (pip.bubbleT > 0 && pip.bubble) {
-    int w = (int)strlen(pip.bubble) * 12 + 12, h = 24;
-    int bx = (int)clampf(b.x - w / 2, ROOM_L + 2, ROOM_R - w - 2);
-    int by = (int)(b.y - b.r - 14 - h);
-    if (by < ROOM_T + 2) by = (int)clampf(b.y + b.r + 10, ROOM_T + 2, ROOM_B - h - 2);
-    cv->fillRoundRect(bx, by, w, h, 8, RGB565_WHITE);
-    cv->drawRoundRect(bx, by, w, h, 8, ink);
-    cv->setFont((const GFXfont *)NULL);
-    cv->setTextSize(2);
-    cv->setTextColor(ink);
-    cv->setCursor(bx + 6, by + 5);
-    cv->print(pip.bubble);
-    cv->setTextSize(1);
-  }
+  if (pip.bubbleT > 0 && pip.bubble) drawBubbleAt(b.x, b.y, b.r, pip.bubble, rgb(250, 248, 240));
 }

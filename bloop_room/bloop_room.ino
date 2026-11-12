@@ -87,6 +87,9 @@ bool toyOut = true;     // false when the toy is put away
 // What Bloop is saying (its language model writes here; see voice.h)
 char sayText[64] = "";
 float sayT = 0;
+uint32_t sayCount = 0;      // goes up each time Bloop says something (the radio watches it)
+uint8_t sayEventNow = 0;    // what the latest line was about
+uint8_t pipTopic = 6;       // what Pip last talked about (PipTopic), for Bloop's reply
 int toolFlash = -1;     // toolbar button to highlight after a tap
 uint32_t toolFlashMs = 0;
 
@@ -331,22 +334,34 @@ void sendBrain() {
 // ---- Talking ----
 uint32_t lastSayMs = 0;
 
-void sendSay(const char *ev, const char *text, unsigned long us) {
+// who: "bloop" or "pip". Pip's lines come over the radio, so they're cleaned of quotes first.
+void sendSay(const char *who, const char *ev, const char *text, unsigned long us) {
   if (!Serial) return;
-  Serial.printf("{\"t\":\"say\",\"ev\":\"%s\",\"text\":\"%s\",\"us\":%lu}\n", ev, text, us);
+  char clean[64];
+  int j = 0;
+  for (int i = 0; text[i] && j < 63; i++)
+    if (text[i] != '"' && text[i] != '\\' && (uint8_t)text[i] >= 32) clean[j++] = text[i];
+  clean[j] = 0;
+  Serial.printf("{\"t\":\"say\",\"who\":\"%s\",\"ev\":\"%s\",\"text\":\"%s\",\"us\":%lu}\n", who, ev, clean, us);
 }
 
 #if BLOOP_HAS_VOICE
 BloopVoice voiceModel;   // the model's working memory (~33 KB)
 const char *const SAY_NAMES[NUM_SAY] = {
   "idle", "fall", "shake", "eat", "overeat", "kick", "pet", "good", "no", "wake", "sleep",
-  "dance", "jump", "hide", "window", "beg", "roll", "grip", "float", "toy"
+  "dance", "jump", "hide", "window", "beg", "roll", "grip", "float", "toy",
+  "visit", "pip", "chat", "bye"
 };
 const int SAY_TOKENS[NUM_SAY] = {
   BV_TOK_EVENT_IDLE, BV_TOK_EVENT_FALL, BV_TOK_EVENT_SHAKE, BV_TOK_EVENT_EAT, BV_TOK_EVENT_OVEREAT,
   BV_TOK_EVENT_KICK, BV_TOK_EVENT_PET, BV_TOK_EVENT_GOOD, BV_TOK_EVENT_NO, BV_TOK_EVENT_WAKE,
   BV_TOK_EVENT_SLEEP, BV_TOK_EVENT_DANCE, BV_TOK_EVENT_JUMP, BV_TOK_EVENT_HIDE, BV_TOK_EVENT_WINDOW,
-  BV_TOK_EVENT_BEG, BV_TOK_EVENT_ROLL, BV_TOK_EVENT_GRIP, BV_TOK_EVENT_FLOAT, BV_TOK_EVENT_TOY
+  BV_TOK_EVENT_BEG, BV_TOK_EVENT_ROLL, BV_TOK_EVENT_GRIP, BV_TOK_EVENT_FLOAT, BV_TOK_EVENT_TOY,
+  BV_TOK_EVENT_VISIT, BV_TOK_EVENT_PIP, BV_TOK_EVENT_CHAT, BV_TOK_EVENT_BYE
+};
+const int PIP_TOPIC_TOKENS[NUM_PIP_TOPICS] = {
+  BV_TOK_PIP_FOOD, BV_TOK_PIP_SLEEP, BV_TOK_PIP_PLAY, BV_TOK_PIP_WEATHER, BV_TOK_PIP_LOVE,
+  BV_TOK_PIP_QUESTION, BV_TOK_PIP_ANY
 };
 float voiceRand() { return (float)(esp_random() >> 8) / 16777216.0f; }
 #endif
@@ -366,6 +381,7 @@ void say(uint8_t ev, bool important) {
   prompt[n++] = s.room == ROOM_CALM ? BV_TOK_ROOM_CALM : (s.room == ROOM_TILTING ? BV_TOK_ROOM_TILT : BV_TOK_ROOM_FLOAT);
   if (lightsOff) prompt[n++] = BV_TOK_DARK;
   if (s.attention) prompt[n++] = BV_TOK_YOU;
+  if (ev == SAY_PIP) prompt[n++] = PIP_TOPIC_TOKENS[pipTopic % NUM_PIP_TOPICS];
   prompt[n++] = SAY_TOKENS[ev];
   prompt[n++] = BV_TOK_SAY;
   int words[20];
@@ -374,7 +390,9 @@ void say(uint8_t ev, bool important) {
   unsigned long us = micros() - t0;
   bv_text(words, nw, sayText, sizeof(sayText));
   sayT = 3.5f;
-  sendSay(SAY_NAMES[ev], sayText, us);
+  sayCount++;
+  sayEventNow = ev;
+  sendSay("bloop", SAY_NAMES[ev], sayText, us);
 #else
   (void)ev; (void)important;
 #endif
@@ -1056,7 +1074,10 @@ void drawToy() {
 }
 
 // Word-wrapped bubble with a little tail pointing at Bloop.
-void drawBubble(const char *txt) {
+void drawBubble(const char *txt) { drawBubbleAt(pet.body.x, pet.body.y, pet.body.r, txt, RGB565_WHITE); }
+
+// Same, pointing at whoever is at (px, py) with radius pr (Pip uses this too).
+void drawBubbleAt(float px, float py, float pr, const char *txt, uint16_t fill) {
   const int maxW = 180, lineH = 18, padX = 10, padY = 7;
   char lines[3][40];
   int n = 0, widest = 0;
@@ -1082,12 +1103,12 @@ void drawBubble(const char *txt) {
   for (int i = 0; i < count; i++) widest = max(widest, textWidth(F_SMALL, lines[i]));
   int w = widest + padX * 2, h = count * lineH + padY * 2 - 4;
 
-  // Above Bloop if there's room, otherwise below.
-  float px = pet.body.x, top = pet.body.y - pet.body.r - 30;
+  // Above the speaker if there's room, otherwise below.
+  float top = py - pr - 30;
   bool above = top - h > ROOM_T + 4;
   int bx = (int)clampf(px - w / 2, ROOM_L + 4, ROOM_R - w - 4);
-  int by = above ? (int)(top - h) : (int)clampf(pet.body.y + pet.body.r + 16, ROOM_T + 4, ROOM_B - h - 4);
-  uint16_t fill = RGB565_WHITE, edge = rgb(40, 36, 60);
+  int by = above ? (int)(top - h) : (int)clampf(py + pr + 16, ROOM_T + 4, ROOM_B - h - 4);
+  uint16_t edge = rgb(40, 36, 60);
   int tx = (int)clampf(px, bx + 12, bx + w - 12);
   if (above) cv->fillTriangle(tx - 7, by + h - 2, tx + 7, by + h - 2, (int)px, by + h + 10, fill);
   else cv->fillTriangle(tx - 7, by + 2, tx + 7, by + 2, (int)px, by - 10, fill);
