@@ -8,9 +8,7 @@ on:
     branches-ignore: [status]
   pull_request:
   workflow_dispatch:
-  workflow_run:  # rebuild (and republish the website) after a new voice is trained
-    workflows: ["Train Bloop's voice"]
-    types: [completed]
+  # "Train Bloop's voice" also starts this (workflow_dispatch) whenever it keeps a better voice.
 
 # One publish at a time; a waiting one is replaced by a newer one.
 concurrency:
@@ -26,7 +24,6 @@ env:
 
 jobs:
   build:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

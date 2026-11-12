@@ -265,20 +265,63 @@ def write_header(P, stats):
         f.write("".join(parts))
 
 
+CKPT_IN = os.path.join(ROOT, "training", "ckpt", "voice.pt")    # last kept model (downloaded by the workflow)
+CKPT_OUT = os.path.join(OUT, "ckpt", "voice.pt")                 # model to save for the next run
+
+
+def make_eval_batches():
+    """A fixed set of lines the model never trains on: the same test every run, so runs compare fairly."""
+    test = VC.corpus(2400, seed=424242)
+    rng = np.random.default_rng(0)
+    return [make_batch(test, rng) for _ in range(25)]
+
+
+@torch.no_grad()
+def test_loss(model, batches):
+    model.eval()
+    tot = 0.0
+    for x, y in batches:
+        tot += F.cross_entropy(model(x).view(-1, V), y.view(-1), ignore_index=-1).item()
+    model.train()
+    return tot / len(batches)
+
+
 def main():
-    torch.manual_seed(SEED)
-    rng = np.random.default_rng(SEED)
-    os.makedirs(OUT, exist_ok=True)
-    train = VC.corpus(40000, seed=SEED)
+    run_no = int(os.environ.get("GITHUB_RUN_NUMBER", "0"))
+    torch.manual_seed(SEED + run_no)
+    rng = np.random.default_rng(SEED + run_no)
+    os.makedirs(os.path.dirname(CKPT_OUT), exist_ok=True)
+    # Each run makes fresh example lines, so continued training keeps seeing new ones.
+    train = VC.corpus(40000, seed=SEED + run_no)
+    evalb = make_eval_batches()
     model = TinyGPT()
     nparams = sum(p.numel() for p in model.parameters())
     print(f"vocab {V} words, {nparams} parameters")
-    opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.01)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=LR, total_steps=STEPS, pct_start=0.1)
+
+    # Continue from the last kept model when there is one and it still fits (same words, same size).
+    version, total_steps, old = 0, 0, None
+    if os.path.exists(CKPT_IN) and os.environ.get("BLOOP_VOICE_FRESH") != "1":
+        ck = torch.load(CKPT_IN, map_location="cpu")
+        if ck.get("vocab") == VOCAB and ck.get("shape") == [D, H, L, T]:
+            model.load_state_dict(ck["model"])
+            version, total_steps = ck.get("version", 1), ck.get("total_steps", 0)
+            old = test_loss(model, evalb)
+            print(f"continuing from voice v{version} ({total_steps} steps so far), test loss {old:.4f}")
+        else:
+            print("the saved voice has different words or size - starting fresh")
+    resumed = old is not None
+    old_state = {k: v.clone() for k, v in model.state_dict().items()} if resumed else None
+
+    # Fresh: warm up to a high learning rate. Continuing: gentler, so it refines instead of forgetting.
+    lr = LR if not resumed else LR / 3
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=STEPS, pct_start=0.1 if not resumed else 0.05)
     t0 = time.time()
     losses = []
     write_status(state="training", step=0, steps=STEPS, loss=None, elapsed_s=0, params=nparams, vocab=V,
                  started=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), curve=[],
+                 mode="continue" if resumed else "fresh", from_version=version if resumed else None,
+                 old_test_loss=round(old, 4) if resumed else None,
                  run_url=os.environ.get("RUN_URL"), commit=os.environ.get("GITHUB_SHA", "")[:7] or None)
     last_write = 0.0
     for step in range(STEPS):
@@ -298,7 +341,21 @@ def main():
             print(f"step {step:5d}  loss {np.mean(losses[-100:]):.3f}  ({time.time() - t0:.0f}s)")
     model.eval()
     final = float(np.mean(losses[-200:]))
+    new = test_loss(model, evalb)
+    # Keep the new model only if it does at least as well on the lines it never trained on.
+    kept = "new" if not resumed or new <= old else "old"
+    if kept == "old":
+        model.load_state_dict(old_state)
+        print(f"new test loss {new:.4f} is worse than {old:.4f} - keeping the old voice v{version}")
+    else:
+        version += 1
+        total_steps += STEPS
+        print(f"keeping the new voice v{version}: test loss {new:.4f}" + (f" (was {old:.4f})" if resumed else ""))
+    model.eval()
+    torch.save({"model": model.state_dict(), "vocab": VOCAB, "shape": [D, H, L, T],
+                "version": version, "total_steps": total_steps}, CKPT_OUT)
     write_status(state="checking", step=STEPS, loss=round(final, 4), elapsed_s=round(time.time() - t0),
+                 test_loss=round(new, 4), kept=kept, version=version, total_steps=total_steps,
                  curve=[round(float(np.mean(losses[max(0, i - 50):i + 1])), 4) for i in range(0, STEPS, 25)])
 
     P = export_params(model)
@@ -333,7 +390,8 @@ def main():
     for pr in test_prompts[:12]:
         words = [VOCAB[i] for i in pr if VOCAB[i] != "<say>"]
         samples.append({"feels": words, "says": detok(np_generate(P, pr, rng=rng, temp=0.8))})
-    stats = {"steps": STEPS, "loss": final, "params": nparams, "vocab": V, "agree": agree,
+    stats = {"steps": total_steps, "version": version, "test_loss": round(min(new, old) if kept == "old" else new, 4),
+             "kept": kept, "loss": final, "params": nparams, "vocab": V, "agree": agree,
              "of": len(test_prompts), "seconds": round(time.time() - t0), "samples": samples,
              "curve": [round(float(np.mean(losses[max(0, i - 50):i + 1])), 4) for i in range(0, STEPS, 25)]}
     with open(os.path.join(OUT, "voice_samples.json"), "w") as f:

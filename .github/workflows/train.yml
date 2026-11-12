@@ -2,9 +2,13 @@ name: Train Bloop's voice
 
 # Trains Bloop's tiny language model on GitHub's computers, checks the board's C code
 # gives the same answers, and saves the result to the "voice" release. Progress is pushed
-# live to the "status" branch, which the website reads. When it finishes, "Build and
-# publish" runs again so the website's firmware has the new voice.
+# live to the "status" branch, which the website reads.
+# Every hour it continues from the last kept model (voice.pt in the "voice" release). A new
+# version only replaces the old one if it does at least as well on test lines it never
+# trained on; then "Build and publish" runs so the website's firmware gets it.
 on:
+  schedule:
+    - cron: "30 * * * *"   # every hour, at half past
   push:
     branches: [main]
     paths:
@@ -13,12 +17,17 @@ on:
   workflow_dispatch:
     inputs:
       steps:
-        description: "Training steps (more = longer training, usually better)"
+        description: "Training steps this run (more = longer training)"
         type: string
-        default: "3000"
+        default: "6000"
+      fresh:
+        description: "Start from scratch instead of continuing from the last kept voice"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+  actions: write   # to start "Build and publish" when a better voice is kept
 
 concurrency:
   group: train-voice
@@ -45,12 +54,21 @@ jobs:
           echo "{\"state\":\"starting\",\"run_url\":\"$RUN_URL\",\"commit\":\"${GITHUB_SHA::7}\",\"updated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > training/out/status.json
           bash training/push_status.sh || true
 
+      - name: Get the last kept voice and the training history
+        run: |
+          mkdir -p training/ckpt
+          gh release download voice -p voice.pt -D training/ckpt --clobber \
+            && echo "Continuing from the saved voice" || echo "No saved voice yet - starting fresh"
+          curl -sf "https://raw.githubusercontent.com/${{ github.repository }}/status/status.json" -o training/out/prev_status.json \
+            || echo "{}" > training/out/prev_status.json
+
       - name: Install PyTorch (CPU) and numpy
         run: pip install --quiet numpy torch --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
 
       - name: Train (live progress goes to the website)
         env:
-          BLOOP_VOICE_STEPS: ${{ github.event.inputs.steps || '3000' }}
+          BLOOP_VOICE_STEPS: ${{ github.event.inputs.steps || '6000' }}
+          BLOOP_VOICE_FRESH: ${{ github.event.inputs.fresh == 'true' && '1' || '0' }}
         run: |
           python training/train_voice.py & PID=$!
           while kill -0 $PID 2>/dev/null; do
@@ -69,7 +87,7 @@ jobs:
           gh release view voice >/dev/null 2>&1 || \
             gh release create voice --prerelease --title "Bloop's trained voice" \
               --notes "The newest trained language model. The build puts it into the firmware. Not for flashing."
-          gh release upload voice --clobber bloop_room/voice_weights.h training/out/voice_samples.json training/out/voice_test.txt
+          gh release upload voice --clobber training/out/ckpt/voice.pt bloop_room/voice_weights.h training/out/voice_samples.json training/out/voice_test.txt
 
       - name: Tell the website training is done
         run: |
@@ -79,6 +97,14 @@ jobs:
           s = json.load(open(p))
           s["state"] = "done"
           s["c_test"] = "pass"
+          prev = json.load(open("training/out/prev_status.json"))
+          # Every run so far (kept or not), for the website's history chart
+          h = prev.get("history", [])
+          h.append({"date": s.get("started"), "run_url": s.get("run_url"), "mode": s.get("mode"),
+                    "steps": s.get("steps"), "seconds": s.get("elapsed_s"), "kept": s.get("kept"),
+                    "version": s.get("version"), "test_loss": s.get("test_loss"), "old_test_loss": s.get("old_test_loss")})
+          s["history"] = h[-200:]
+          s["runs"] = prev.get("runs", len(h) - 1) + 1
           import time; s["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
           json.dump(s, open(p, "w"))
           EOF
@@ -92,7 +118,17 @@ jobs:
           p = "training/out/status.json"
           s = json.load(open(p)) if os.path.exists(p) else {}
           s["state"] = "failed"
+          if os.path.exists("training/out/prev_status.json"):   # keep the history across a failed run
+              prev = json.load(open("training/out/prev_status.json"))
+              for k in ("history", "runs"):
+                  if k in prev and k not in s: s[k] = prev[k]
           import time; s["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
           json.dump(s, open(p, "w"))
           EOF
           bash training/push_status.sh || true
+
+      - name: Rebuild the firmware and website with the new voice
+        run: |
+          KEPT=$(python -c "import json; print(json.load(open('training/out/status.json')).get('kept'))")
+          if [ "$KEPT" = "new" ]; then gh workflow run build.yml --ref main && echo "Started Build and publish"
+          else echo "The old voice was kept - no rebuild needed"; fi

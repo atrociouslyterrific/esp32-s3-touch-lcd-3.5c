@@ -210,7 +210,7 @@ a { color: var(--series-1); }
         <h2 style="margin:0">Training Bloop's voice on GitHub</h2>
         <span class="chip"><span class="dot" id="trDot"></span><span id="trState">Checking…</span></span>
       </div>
-      <p class="note" style="margin-top:6px" id="trNote">GitHub trains Bloop's language model whenever its training code changes. This updates live while it runs.</p>
+      <p class="note" style="margin-top:6px" id="trNote">GitHub keeps training Bloop's language model, once an hour. This updates live while it runs.</p>
       <div class="progress" aria-hidden="true"><div class="fill" id="trBar"></div></div>
       <div class="tiles" style="margin-top:12px">
         <div class="tile"><div class="label">Step</div><div class="value" id="trStep">–</div><div class="hint" id="trPct">&nbsp;</div></div>
@@ -218,11 +218,20 @@ a { color: var(--series-1); }
         <div class="tile"><div class="label">Time training</div><div class="value" id="trTime">–</div><div class="hint" id="trEta">&nbsp;</div></div>
         <div class="tile"><div class="label">Last update</div><div class="value" id="trAgo">–</div><div class="hint" id="trLink">&nbsp;</div></div>
       </div>
+      <div class="tiles" style="margin-top:12px">
+        <div class="tile"><div class="label">Voice version</div><div class="value" id="trVer">–</div><div class="hint" id="trVerHint">&nbsp;</div></div>
+        <div class="tile"><div class="label">Test loss</div><div class="value" id="trTest">–</div><div class="hint">on lines it never trained on</div></div>
+        <div class="tile"><div class="label">Training runs</div><div class="value" id="trRuns">–</div><div class="hint" id="trKeptHint">&nbsp;</div></div>
+        <div class="tile"><div class="label">Next run</div><div class="value" id="trNext">–</div><div class="hint">every hour at :30</div></div>
+      </div>
+      <h2 style="margin-top:16px">Every run so far</h2>
+      <p class="note">Test loss after each run. A run's new version replaces the old one only if it does at least as well: <span style="color:var(--series-1);font-weight:650">filled dots</span> were kept, hollow ones were thrown away.</p>
+      <div class="chart" id="trHist"></div>
     </section>
 
     <section class="card span-12">
       <h2>Bloop's voice: a tiny language model</h2>
-      <p class="note">This part <b>is</b> a neural network: a tiny transformer, the same kind of model as large language models, just about 2,000 times smaller than GPT-2. GitHub trains it on example lines every time its training code changes (progress shows live above), and it runs on the board itself. It reads how Bloop feels and what just happened, then writes one word at a time, feeding each word back in to choose the next.</p>
+      <p class="note">This part <b>is</b> a neural network: a tiny transformer, the same kind of model as large language models, just about 2,000 times smaller than GPT-2. GitHub keeps training it on fresh example lines every hour (progress shows live above), and it runs on the board itself. It reads how Bloop feels and what just happened, then writes one word at a time, feeding each word back in to choose the next.</p>
       <div style="overflow-x:auto"><div class="chart" id="voiceDiagram" style="min-width:720px"></div></div>
       <div class="tiles" style="margin-top:12px">
         <div class="tile"><div class="label">Parameters</div><div class="value" id="vParams">–</div><div class="hint">the numbers it learned</div></div>
@@ -975,22 +984,70 @@ async function fetchTraining() {
   trTimer = setTimeout(fetchTraining, busy ? 15000 : 60000);
 }
 
+function drawTrainHistory() {
+  const box = document.getElementById("trHist");
+  box.replaceChildren();
+  const h = (trStatus?.history || []).filter(r => r.test_loss != null);
+  if (h.length < 1) { const d = document.createElement("div"); d.className = "empty"; d.textContent = "The chart starts after the first continued run finishes."; box.appendChild(d); return; }
+  const W = 960, H = 200, m = { l: 48, r: 14, t: 14, b: 28 };
+  const ys = h.map(r => r.test_loss);
+  let y0 = Math.min(...ys), y1 = Math.max(...ys); const pad = (y1 - y0) * 0.15 || 0.02; y0 = Math.max(0, y0 - pad); y1 += pad;
+  const n = h.length, X = i => m.l + (n === 1 ? 0.5 : i / (n - 1)) * (W - m.l - m.r), Y = v => m.t + (1 - (v - y0) / (y1 - y0)) * (H - m.t - m.b);
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Test loss after each training run" }, box);
+  for (const t of niceTicks(y0, y1, 4)) {
+    if (t < y0 || t > y1) continue;
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), stroke: cssVar("--grid") }, svg);
+    svgText(svg, m.l - 6, Y(t) + 4, String(+t.toFixed(3)), { "text-anchor": "end", "font-size": 11, fill: cssVar("--muted") });
+  }
+  svgText(svg, m.l, H - 8, "run 1", { "font-size": 11, fill: cssVar("--muted") });
+  if (n > 1) svgText(svg, W - m.r, H - 8, "run " + n, { "text-anchor": "end", "font-size": 11, fill: cssVar("--muted") });
+  // Line through the kept versions: the voice the board actually gets.
+  let d = "", best = null;
+  h.forEach((r, i) => { if (r.kept === "new") best = r.test_loss; if (best != null) d += (d ? "L" : "M") + X(i).toFixed(1) + "," + Y(best).toFixed(1); });
+  if (d) el("path", { d, fill: "none", stroke: cssVar("--series-1"), "stroke-width": 2, "stroke-linejoin": "round" }, svg);
+  const c1 = cssVar("--series-1"), surf = cssVar("--surface");
+  h.forEach((r, i) => {
+    const dot = el("circle", { cx: X(i), cy: Y(r.test_loss), r: 4.5, fill: r.kept === "new" ? c1 : surf, stroke: c1, "stroke-width": 1.5 }, svg);
+    dot.addEventListener("pointermove", e => showTip(e, [r.test_loss.toFixed(4) + " test loss", (r.kept === "new" ? "kept as v" + r.version : "thrown away") + " · " + (r.steps || 0).toLocaleString() + " steps", r.date ? new Date(r.date).toLocaleString() : ""]));
+    dot.addEventListener("pointerleave", hideTip);
+  });
+}
+
+function drawTrainTotals() {
+  const s = trStatus, h = s?.history || [];
+  const ver = s?.version;
+  setText("trVer", ver ? "v" + ver : "–");
+  setText("trVerHint", s?.total_steps ? s.total_steps.toLocaleString() + " steps in all" : "\u00a0");
+  const lastKept = [...h].reverse().find(r => r.kept === "new");
+  const tl = s?.state === "done" ? (s.kept === "old" ? s.old_test_loss : s.test_loss) : lastKept?.test_loss;
+  setText("trTest", tl != null ? tl.toFixed(3) : "–");
+  setText("trRuns", s?.runs ?? (h.length || "–"));
+  const k = h.filter(r => r.kept === "new").length;
+  setText("trKeptHint", h.length ? k + " kept, " + (h.length - k) + " thrown away" : "\u00a0");
+  const now = new Date(), next = new Date(now); next.setUTCMinutes(30, 0, 0); if (next <= now) next.setUTCHours(next.getUTCHours() + 1);
+  setText("trNext", ["starting", "training", "checking", "trained"].includes(s?.state) ? "now" : "in " + Math.ceil((next - now) / 60000) + "m");
+}
+
 function drawTraining() {
   const s = trStatus, run = trRun;
-  let word = "No training yet", cls = "", note = "GitHub trains Bloop's language model whenever its training code changes. This updates live while it runs.";
+  let word = "No training yet", cls = "", note = "GitHub keeps training Bloop's language model, once an hour. This updates live while it runs.";
   const stale = s?.updated && Date.now() - Date.parse(s.updated) > 15 * 60000;
   if (run && run.status !== "completed" && (!s || ["done", "failed"].includes(s.state) || Date.parse(run.created_at) > Date.parse(s.updated || 0))) {
     word = run.status === "queued" ? "Waiting for a GitHub computer" : "Starting"; cls = "run";
     note = "A new training run has started on GitHub. Progress shows here once the model is loaded.";
   } else if (s?.state === "training" || s?.state === "starting") {
+    if (s.mode === "continue") note = "Continuing from voice v" + s.from_version + " (test loss " + (s.old_test_loss ?? 0).toFixed(3) + "). The loss chart below fills in as it goes.";
     word = stale ? "Training (no news for a while)" : s.state === "starting" ? "Getting ready" : "Training"; cls = stale ? "" : "run";
-    note = "Bloop's voice is learning right now on a GitHub computer. The loss chart below fills in as it goes.";
+    if (s.state === "starting") note = "Getting a GitHub computer ready (installing PyTorch takes about a minute).";
+    else if (s.mode !== "continue") note = "Bloop's voice is learning from scratch on a GitHub computer. The loss chart below fills in as it goes.";
   } else if (s?.state === "checking" || s?.state === "trained") {
     word = "Checking the board's code"; cls = "run";
     note = "Training finished. GitHub is checking the board's 8-bit version gives the same answers.";
   } else if (s?.state === "done") {
     word = "Trained " + fmtAgo(s.updated); cls = "ok";
-    note = "Done. The website's Install button gets the new voice once GitHub rebuilds the firmware (a few minutes after training).";
+    note = s.kept === "old"
+      ? "Last run finished, but its version wasn't better on the test lines, so Bloop keeps the voice it had. Next run tries again."
+      : "Last run made a better voice. The Install button gets it once GitHub rebuilds the firmware (a few minutes after training).";
   } else if (s?.state === "failed" || (run && run.status === "completed" && run.conclusion === "failure")) {
     word = "Training failed"; cls = "bad";
     note = "The last training run didn't finish. The firmware keeps the previous voice. The run's log on GitHub says why.";
@@ -1013,6 +1070,8 @@ function drawTraining() {
   const url = (run && run.status !== "completed") ? run.html_url : (s?.run_url || run?.html_url);
   if (url) { const a = document.createElement("a"); a.href = url; a.target = "_blank"; a.rel = "noopener"; a.textContent = "Open the run on GitHub"; link.appendChild(a); }
   else link.textContent = "\u00a0";
+  drawTrainTotals();
+  drawTrainHistory();
   // While training, the loss chart shows the live curve.
   if (s?.curve?.length > 1 && ["training", "checking", "trained"].includes(s.state)) {
     voice = Object.assign({}, voice || {}, { curve: s.curve, liveCurve: true });
