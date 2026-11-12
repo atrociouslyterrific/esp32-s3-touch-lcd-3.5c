@@ -17,14 +17,17 @@
 
 enum Action : uint8_t {
   ACT_WANDER, ACT_BALL, ACT_EAT, ACT_SLEEP, ACT_GRIP, ACT_CURL, ACT_COME, ACT_SIT,
+  ACT_DANCE, ACT_JUMP, ACT_BEG, ACT_HIDE, ACT_WINDOW, ACT_ROLL,
   NUM_ACTIONS
 };
 const char *const ACTION_NAMES[NUM_ACTIONS] = {
-  "WANDER", "CHASE BALL", "EAT", "SLEEP", "GRIP WALL", "CURL UP", "COME TO YOU", "SIT"
+  "WANDER", "CHASE BALL", "EAT", "SLEEP", "GRIP WALL", "CURL UP", "COME TO YOU", "SIT",
+  "DANCE", "JUMP", "BEG FOR FOOD", "HIDE BY BED", "LOOK OUTSIDE", "ROLL AROUND"
 };
 // Short words for Bloop's thought bubble.
 const char *const ACTION_THOUGHTS[NUM_ACTIONS] = {
-  "...", "ball!", "food?", "zzz", "hold!", "curl", "you?", "hmm"
+  "...", "ball!", "food?", "zzz", "hold!", "curl", "you?", "hmm",
+  "la la!", "boing!", "pls food", "eep!", "ooh", "wheee"
 };
 
 // The situation is built from 6 yes/no-ish features:

@@ -11,8 +11,10 @@ Arduino sketches for the Waveshare **ESP32-S3-Touch-LCD-3.5-C**: an ESP32-S3 (16
 Bloop is a pet that lives in a room you can tip over, and it learns by itself.
 
 - **Real gravity.** The board's motion sensor decides which way is down. Tip the board and the floor changes: Bloop, its ball, food and bed slide and fall. Hard landings hurt. Shake it and everything flies (and Bloop gets dizzy). Lay the board flat and the room goes zero-g.
-- **A brain that learns on the board.** Bloop starts as a clueless baby. Every couple of seconds it picks one of 8 actions (wander, chase ball, eat, sleep, grip the wall, curl up, come to you, sit) and learns from what happens (Q-learning). Over time it works out habits, like gripping the wall or curling up when the room starts to tilt.
-- **You train it.** Hold a finger on Bloop to pet it, or tap **GOOD** / **NO** to reward or scold what it's doing. Drag Bloop or the ball to throw them. **FEED** drops a snack, **BALL** tosses the ball in, **BRAIN** shows what it has learned.
+- **A brain that learns on the board.** Bloop starts as a clueless baby. Every couple of seconds it picks one of 14 actions (wander, chase its toy, eat, sleep, grip the wall, curl up, come to you, sit, dance, jump, beg for food, hide by its bed, look out the window, roll around) and learns from what happens (Q-learning). Over time it works out habits, like gripping the wall or curling up when the room starts to tilt.
+- **You train it.** Hold a finger on Bloop to pet it, or tap **GOOD** / **NO** to reward or scold what it's doing. Drag Bloop or its toy to throw them. **FEED** drops a snack, **TOY** tosses its toy in.
+- **It has a bed** that stands on whichever wall is the floor and tumbles when you tip the room. Bloop gets tucked in when it sleeps there.
+- **MORE menu:** see its **BRAIN**, turn the **LIGHTS** off (it gets sleepy, and sleeping is cosier), pick a **TOY** (ball, block or beach ball), **CLEAN UP** snacks, redo **TILT SETUP**, or send it to bed (**BEDTIME**).
 - **It remembers.** Its brain and stats are saved on the board.
 - **First start:** a 2-step tilt setup teaches it which way the board is facing. You can redo it from the BRAIN screen.
 

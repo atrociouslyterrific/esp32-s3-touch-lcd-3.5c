@@ -23,7 +23,7 @@
 #define LCD_SPI_HZ 80000000     // Waveshare's own firmware runs the screen at 80 MHz
 
 // ---- Screens ----
-enum Screen : uint8_t { SCR_ROOM, SCR_BRAIN, SCR_CAL };
+enum Screen : uint8_t { SCR_ROOM, SCR_BRAIN, SCR_CAL, SCR_MENU };
 
 // ---- Bloop ----
 struct Pet {
@@ -32,7 +32,8 @@ struct Pet {
   float actionTime;      // seconds since this action started
   float hunger, energy, joy, health, stamina;   // 0..100
   float hurtT, dizzyT, eatT, sadT, kickCool, hopCool, blinkT, bubbleT;
-  bool asleep, held, curled, gripping, slipping;
+  bool asleep, held, curled, gripping, slipping, hiding;
+  float danceT;          // dance animation clock
   float angle;           // drawing angle of "down" (radians)
   float walkPhase;
   Vec2 target, look;
@@ -60,6 +61,14 @@ Body food[MAX_FOOD];
 Particle parts[MAX_PARTICLES];
 Brain brain;
 Screen screen = SCR_ROOM;
+
+// Options (MORE menu)
+bool lightsOff = false;
+enum Toy : uint8_t { TOY_BALL, TOY_BLOCK, TOY_BEACH, NUM_TOYS };
+const char *const TOY_NAMES[NUM_TOYS] = {"BALL", "BLOCK", "BEACH BALL"};
+uint8_t toy = TOY_BALL;
+float toySpin = 0;      // for drawing the block turning
+float bedAngle = PI / 2;
 
 // Gravity
 float rawA[3] = {0, 0, -1};        // filtered chip readings (g)
@@ -171,6 +180,8 @@ void saveAll() {
   prefs.putUInt("falls", pet.falls);
   prefs.putUInt("treats", pet.treats);
   prefs.putUInt("kicks", pet.kicks);
+  prefs.putBool("dark", lightsOff);
+  prefs.putUChar("toy", toy);
 }
 
 void loadAll() {
@@ -183,6 +194,8 @@ void loadAll() {
   pet.falls = prefs.getUInt("falls", 0);
   pet.treats = prefs.getUInt("treats", 0);
   pet.kicks = prefs.getUInt("kicks", 0);
+  lightsOff = prefs.getBool("dark", false);
+  toy = prefs.getUChar("toy", TOY_BALL) % NUM_TOYS;
   axisY = prefs.getUChar("axY", 1);
   signX = prefs.getChar("sgX", -1);
   signY = prefs.getChar("sgY", -1);
@@ -321,7 +334,9 @@ void onShake() {
   }
   for (int i = 0; i < MAX_FOOD; i++)
     if (food[i].active) { food[i].vx += frand(-300, 300); food[i].vy += frand(-300, 300); }
-  if (!pet.curled && !(pet.gripping && pet.stamina > 0)) {
+  if (pet.hiding) {
+    rewardAcc += 0.8f;   // phew, safe by the bed
+  } else if (!pet.curled && !(pet.gripping && pet.stamina > 0)) {
     pet.dizzyT = 2.5f;
     rewardAcc -= 1.0f;
     pet.asleep = false;
@@ -337,16 +352,35 @@ void dropFood() {
     if (food[i].active) continue;
     Vec2 p = ceilingSpot();
     bodyInit(food[i], BODY_FOOD, p.x, p.y, 7, 0.35f, 4);
+    if (pet.action == ACT_BEG) {   // begging worked!
+      rewardAcc += pet.hunger > 40 ? 1.2f : 0.3f;
+      pet.joy = clampf(pet.joy + 5, 0, 100);
+    }
     decideNow = true;
     return;
   }
 }
 
+void initToy(float x, float y) {
+  switch (toy) {
+    case TOY_BLOCK: bodyInit(ball, BODY_BALL, x, y, 12, 0.15f, 5.0f); break;
+    case TOY_BEACH: bodyInit(ball, BODY_BALL, x, y, 20, 0.65f, 0.4f); break;
+    default:        bodyInit(ball, BODY_BALL, x, y, 13, 0.8f, 0.8f); break;
+  }
+}
+
 void tossBall() {
   Vec2 p = ceilingSpot();
-  bodyInit(ball, BODY_BALL, p.x, p.y, 13, 0.8f, 0.8f);
+  initToy(p.x, p.y);
   ball.vx = frand(-200, 200);
   ball.vy = frand(-200, 200);
+}
+
+// The window on the back wall (drawn in drawRoom).
+const int WIN_X = 105, WIN_Y = 120, WIN_W = 110, WIN_H = 86;
+
+bool nearBed(float extra) {
+  return vlen(v2(bed.x - pet.body.x, bed.y - pet.body.y)) < pet.body.r + bed.r + extra;
 }
 
 void petBehave(float dt) {
@@ -358,11 +392,14 @@ void petBehave(float dt) {
   float slope = (gScreen.x * t.x + gScreen.y * t.y) / gm;   // sideways pull along the floor
   Vec2 up = v2(-gScreen.x / gm, -gScreen.y / gm);
 
-  pet.curled = (pet.action == ACT_CURL) && !pet.asleep;
+  pet.curled = (pet.action == ACT_CURL || pet.action == ACT_ROLL) && !pet.asleep;
+  pet.hiding = (pet.action == ACT_HIDE) && nearBed(14);
+  bool calm = onFloor && !pet.slipping && pet.dizzyT <= 0 && pet.hurtT <= 0;
+  bool watched = millis() - lastTouchMs < 6000;
   pet.gripping = (pet.action == ACT_GRIP) && b.touching && pet.stamina > 0;
   pet.slipping = onFloor && fabsf(slope) > STEEP && !pet.gripping;
 
-  b.r = pet.curled ? 17 : 22;
+  b.r = pet.curled ? 17 : (pet.hiding ? 18 : 22);
   b.bounce = pet.curled ? 0.55f : 0.22f;
   b.friction = pet.curled ? 1.0f : 7.0f;
 
@@ -391,6 +428,19 @@ void petBehave(float dt) {
       pet.target = callPoint;
       wantsMove = true;
       speed = 120;
+      break;
+    case ACT_BEG:
+      pet.target = callPoint;
+      wantsMove = vlen(v2(callPoint.x - b.x, callPoint.y - b.y)) > 40;
+      break;
+    case ACT_HIDE:
+      pet.target = v2(bed.x, bed.y);
+      wantsMove = !pet.hiding;
+      speed = 130;
+      break;
+    case ACT_WINDOW:
+      pet.target = v2(WIN_X + WIN_W / 2, WIN_Y + WIN_H / 2);
+      wantsMove = true;
       break;
     default:
       break;
@@ -429,6 +479,68 @@ void petBehave(float dt) {
     }
   }
 
+  // ---- The fun stuff ----
+  switch (pet.action) {
+    case ACT_DANCE:
+      if (calm) {
+        pet.danceT += dt;
+        float sway = sinf(pet.danceT * 9) * 60;      // shuffle side to side
+        b.vx += t.x * (sway - (b.vx * t.x + b.vy * t.y)) * clampf(dt * 6, 0, 1);
+        b.vy += t.y * (sway - (b.vx * t.x + b.vy * t.y)) * clampf(dt * 6, 0, 1);
+        pet.walkPhase += dt * 14;
+        pet.joy = clampf(pet.joy + 4 * dt, 0, 100);
+        pet.energy -= 0.4f * dt;
+        rewardAcc += (watched ? 0.3f : 0.05f) * dt;   // more fun with an audience
+        if (frand(0, 1) < dt * 3)
+          spawnParticle(PT_NOTE, b.x + frand(-20, 20), b.y - b.r - 6, frand(-20, 20), -50, 1.0f, rgb(255, 220, 120));
+      }
+      break;
+    case ACT_JUMP:
+      if (calm && pet.hopCool <= 0 && pet.energy > 5) {
+        b.vx += up.x * 470;
+        b.vy += up.y * 470;
+        pet.hopCool = 0.9f;
+        pet.energy -= 2;
+        pet.joy = clampf(pet.joy + 3, 0, 100);
+        rewardAcc += pet.energy > 30 ? 0.25f : -0.2f;
+      }
+      break;
+    case ACT_BEG:
+      if (activeFood() == 0) rewardAcc -= 0.02f * dt;   // waiting is boring
+      break;
+    case ACT_HIDE:
+      if (pet.hiding) {
+        Senses s = sense();
+        rewardAcc += (s.room == ROOM_TILTING ? 0.12f : -0.03f) * dt;
+      }
+      break;
+    case ACT_WINDOW: {
+      Vec2 w = v2(WIN_X + WIN_W / 2 - b.x, WIN_Y + WIN_H / 2 - b.y);
+      float d = vlen(w);
+      if (d > 1) pet.look = v2(w.x / d, w.y / d);
+      bool below = fabsf((WIN_X + WIN_W / 2 - b.x) * t.x + (WIN_Y + WIN_H / 2 - b.y) * t.y) < 30;
+      if (below && calm) {
+        pet.joy = clampf(pet.joy + 2 * dt, 0, 100);
+        rewardAcc += (!pet.asleep && pet.hunger < 55 && pet.energy > 35 ? 0.12f : 0.0f) * dt;
+      }
+      break;
+    }
+    case ACT_ROLL:
+      if (b.touching && !floating) {
+        float roll = (fmodf(pet.actionTime, 2.0f) < 1.0f ? 1 : -1) * 150;
+        float vt = b.vx * t.x + b.vy * t.y;
+        b.vx += t.x * (roll - vt) * clampf(dt * 3, 0, 1);
+        b.vy += t.y * (roll - vt) * clampf(dt * 3, 0, 1);
+        pet.energy -= 0.5f * dt;
+        pet.joy = clampf(pet.joy + 3 * dt, 0, 100);
+        Senses s = sense();
+        rewardAcc += (pet.energy > 30 && s.room == ROOM_CALM ? 0.2f : -0.1f) * dt;
+      }
+      break;
+    default:
+      break;
+  }
+
   // Sleeping: on the bed (or anywhere if it can't get there).
   if (pet.action == ACT_SLEEP && !pet.asleep) {
     bool onBed = vlen(v2(bed.x - b.x, bed.y - b.y)) < b.r + bed.r + 8;
@@ -437,7 +549,8 @@ void petBehave(float dt) {
   if (pet.asleep) {
     bool onBed = vlen(v2(bed.x - b.x, bed.y - b.y)) < b.r + bed.r + 10;
     pet.energy += (onBed ? 4.0f : 2.0f) * dt;
-    if (pet.energy < 40) rewardAcc += 0.6f * dt;
+    float cozy = lightsOff ? 1.5f : 1.0f;   // sleeping is nicer in the dark
+    if (pet.energy < 40) rewardAcc += 0.6f * cozy * dt;
     else if (pet.energy > 85) rewardAcc -= 0.3f * dt;
     else rewardAcc += 0.1f * dt;
     if (frand(0, 1) < dt * 0.8f)
@@ -505,7 +618,7 @@ void eatAndPlay() {
 void updateNeeds(float dt) {
   pet.age += dt;
   pet.hunger = clampf(pet.hunger + 0.18f * dt, 0, 100);
-  if (!pet.asleep) pet.energy -= 0.10f * dt;
+  if (!pet.asleep) pet.energy -= (lightsOff ? 0.25f : 0.10f) * dt;
   pet.energy = clampf(pet.energy, 0, 100);
   pet.joy = clampf(pet.joy - 0.10f * dt, 0, 100);
   if (pet.hunger < 80) pet.health = clampf(pet.health + 0.15f * dt, 0, 100);
@@ -556,6 +669,16 @@ void updateWorld(float dt) {
       if (food[i].active) stepBody(food[i], g, h, floating);
   }
   eatAndPlay();
+
+  // Asleep in bed: settle onto the mattress.
+  if (pet.asleep && !pet.held && nearBed(12)) {
+    Vec2 d = v2(cosf(bedAngle), sinf(bedAngle));
+    float tx = bed.x - d.x * 8, ty = bed.y - d.y * 8;
+    float k = clampf(dt * 4, 0, 1);
+    pet.body.x += (tx - pet.body.x) * k;
+    pet.body.y += (ty - pet.body.y) * k;
+    pet.body.vx = bed.vx; pet.body.vy = bed.vy;
+  }
 
   // Hard landing?
   if (!pet.held && pet.body.impact > 250) {
@@ -708,15 +831,89 @@ void drawBloop() {
   }
 }
 
+// Four-cornered shape (two triangles), for things that turn with gravity.
+void fillQuad(Vec2 a, Vec2 b, Vec2 c, Vec2 d, uint16_t col) {
+  cv->fillTriangle(a.x, a.y, b.x, b.y, c.x, c.y, col);
+  cv->fillTriangle(a.x, a.y, c.x, c.y, d.x, d.y, col);
+}
+
+// Point on the bed: lx along it, ly toward the floor. Its legs stand on the floor.
+Vec2 bedPt(float lx, float ly) {
+  Vec2 d = v2(cosf(bedAngle), sinf(bedAngle));
+  Vec2 r = v2(d.y, -d.x);
+  return v2(bed.x + lx * r.x + ly * d.x, bed.y + lx * r.y + ly * d.y);
+}
+void bedRect(float x0, float y0, float x1, float y1, uint16_t col) {
+  fillQuad(bedPt(x0, y0), bedPt(x1, y0), bedPt(x1, y1), bedPt(x0, y1), col);
+}
+
+const uint16_t BLANKET = 0x4C3B;   // soft blue
+
+void drawBed() {
+  uint16_t wood = rgb(150, 100, 60), woodDark = rgb(110, 70, 40);
+  bedRect(-34, 17, -29, 26, woodDark);          // legs
+  bedRect(29, 17, 34, 26, woodDark);
+  bedRect(-36, 8, 36, 18, wood);                // frame
+  bedRect(-38, -24, -31, 18, wood);             // headboard
+  bedRect(31, -8, 38, 18, wood);                // footboard
+  bedRect(-31, -3, 31, 9, rgb(240, 236, 228));  // mattress
+  Vec2 p = bedPt(-21, -6);                      // pillow
+  cv->fillCircle(p.x, p.y, 7, RGB565_WHITE);
+  p = bedPt(-15, -6);
+  cv->fillCircle(p.x, p.y, 7, RGB565_WHITE);
+  if (!(pet.asleep && nearBed(12))) {
+    bedRect(-6, -4, 31, 9, BLANKET);            // blanket, folded back
+    bedRect(-6, -4, -2, 9, rgb(140, 180, 240));
+  }
+}
+
+// When Bloop sleeps in bed, tuck it in.
+void drawBlanketOverBloop() {
+  float r = pet.body.r;
+  fillQuad(bp(-r * 1.25f, -r * 0.05f), bp(r * 1.25f, -r * 0.05f), bp(r * 1.25f, r * 1.0f), bp(-r * 1.25f, r * 1.0f), BLANKET);
+  fillQuad(bp(-r * 1.25f, -r * 0.05f), bp(r * 1.25f, -r * 0.05f), bp(r * 1.25f, r * 0.2f), bp(-r * 1.25f, r * 0.2f), rgb(140, 180, 240));
+}
+
+void drawToy() {
+  if (!ball.active) return;
+  if (toy == TOY_BLOCK) {
+    float a = toySpin, h = ball.r;
+    Vec2 c = v2(ball.x, ball.y);
+    Vec2 u = v2(cosf(a) * h, sinf(a) * h), v = v2(-sinf(a) * h, cosf(a) * h);
+    fillQuad(v2(c.x - u.x - v.x, c.y - u.y - v.y), v2(c.x + u.x - v.x, c.y + u.y - v.y),
+             v2(c.x + u.x + v.x, c.y + u.y + v.y), v2(c.x - u.x + v.x, c.y - u.y + v.y), rgb(250, 200, 60));
+    cv->setTextSize(1);
+    cv->setTextColor(rgb(150, 90, 20));
+    cv->setCursor(ball.x - 2, ball.y - 3);
+    cv->print("B");
+  } else if (toy == TOY_BEACH) {
+    cv->fillCircle(ball.x, ball.y, ball.r, RGB565_WHITE);
+    const uint16_t cols[3] = {rgb(240, 70, 80), rgb(60, 140, 240), rgb(250, 200, 50)};
+    for (int k = 0; k < 3; k++) {
+      float a0 = toySpin + k * 2.094f;
+      Vec2 c = v2(ball.x, ball.y);
+      cv->fillTriangle(c.x, c.y, c.x + cosf(a0) * ball.r, c.y + sinf(a0) * ball.r,
+                       c.x + cosf(a0 + 1.0f) * ball.r, c.y + sinf(a0 + 1.0f) * ball.r, cols[k]);
+    }
+    cv->fillCircle(ball.x, ball.y, 3, RGB565_WHITE);
+  } else {
+    cv->fillCircle(ball.x, ball.y, ball.r, rgb(240, 70, 80));
+    float a = toySpin;
+    cv->drawLine(ball.x - cosf(a) * ball.r, ball.y - sinf(a) * ball.r, ball.x + cosf(a) * ball.r, ball.y + sinf(a) * ball.r, RGB565_WHITE);
+    cv->fillCircle(ball.x - 4, ball.y - 4, 3, rgb(255, 170, 170));
+  }
+}
+
 void drawRoom() {
-  // Wallpaper
-  uint16_t wall = rgb(58, 50, 92), stripe = rgb(66, 58, 104);
+  // Wallpaper (dimmer with the lights off)
+  uint16_t wall = lightsOff ? rgb(26, 22, 44) : rgb(58, 50, 92);
+  uint16_t stripe = lightsOff ? rgb(30, 26, 50) : rgb(66, 58, 104);
   cv->fillRect(0, HUD_H, SCREEN_W, TOOLBAR_Y - HUD_H, wall);
   for (int x = 12; x < SCREEN_W; x += 28) cv->fillRect(x, HUD_H, 8, TOOLBAR_Y - HUD_H, stripe);
 
   // Window on the back wall: day sky, or night when Bloop sleeps
   int wx = 105, wy = 120, ww = 110, wh = 86;
-  bool night = pet.asleep;
+  bool night = pet.asleep || lightsOff;
   cv->fillRect(wx - 5, wy - 5, ww + 10, wh + 10, rgb(140, 100, 70));
   cv->fillRect(wx, wy, ww, wh, night ? rgb(20, 24, 60) : rgb(120, 190, 240));
   if (night) {
@@ -750,9 +947,7 @@ void drawRoom() {
   cv->fillRect(0, HUD_H, L, TOOLBAR_Y - HUD_H, fw == WALL_L ? carpet : wood);
   cv->fillRect(R, HUD_H, SCREEN_W - R, TOOLBAR_Y - HUD_H, fw == WALL_R ? carpet : wood);
 
-  // Bed (a cushion)
-  cv->fillCircle(bed.x, bed.y, bed.r, rgb(120, 170, 230));
-  cv->drawCircle(bed.x, bed.y, bed.r - 5, rgb(170, 210, 250));
+  drawBed();
 
   // Food
   for (int i = 0; i < MAX_FOOD; i++) {
@@ -761,14 +956,10 @@ void drawRoom() {
     cv->fillCircle(food[i].x - 2, food[i].y - 2, 2, rgb(255, 220, 140));
   }
 
-  // Ball
-  if (ball.active) {
-    cv->fillCircle(ball.x, ball.y, ball.r, rgb(240, 70, 80));
-    cv->drawLine(ball.x - ball.r, ball.y, ball.x + ball.r, ball.y, RGB565_WHITE);
-    cv->fillCircle(ball.x - 4, ball.y - 4, 3, rgb(255, 170, 170));
-  }
+  drawToy();
 
   drawBloop();
+  if (pet.asleep && nearBed(12)) drawBlanketOverBloop();
 
   // Particles
   for (int i = 0; i < MAX_PARTICLES; i++) {
@@ -789,6 +980,11 @@ void drawRoom() {
         break;
       case PT_DUST:
         cv->fillCircle(p.x, p.y, (int)(p.life * 8) + 1, p.color);
+        break;
+      case PT_NOTE:
+        cv->fillCircle(p.x, p.y + 6, 3, p.color);
+        cv->drawFastVLine(p.x + 2, p.y - 2, 8, p.color);
+        cv->drawLine(p.x + 2, p.y - 2, p.x + 6, p.y, p.color);
         break;
       case PT_ZZZ:
         cv->setTextSize(p.life > 0.8f ? 2 : 1);
@@ -863,14 +1059,14 @@ void drawHud() {
   }
 }
 
-const char *const TOOL_LABELS[5] = {"FEED", "BALL", "GOOD", "NO", "BRAIN"};
+const char *const TOOL_LABELS[5] = {"FEED", "TOY", "GOOD", "NO", "MORE"};
 
 void drawToolbar() {
   cv->fillRect(0, TOOLBAR_Y, SCREEN_W, SCREEN_H - TOOLBAR_Y, rgb(22, 20, 34));
   const uint16_t cols[5] = {rgb(200, 120, 40), rgb(200, 60, 70), rgb(50, 150, 80), rgb(150, 50, 50), rgb(80, 80, 160)};
   for (int i = 0; i < 5; i++) {
     int x = i * 64 + 3;
-    bool on = (i == 4 && screen == SCR_BRAIN);
+    bool on = (i == 4 && screen != SCR_ROOM);
     cv->fillRoundRect(x, TOOLBAR_Y + 8, 58, 40, 8, on ? RGB565_WHITE : cols[i]);
     cv->setTextSize(2);
     cv->setTextColor(on ? cols[i] : RGB565_WHITE);
@@ -881,7 +1077,7 @@ void drawToolbar() {
 }
 
 // ---- Brain screen ----
-const int BTN_Y = 372;
+const int BTN_Y = 382;
 
 void describeState(const Senses &s, char *out, size_t n) {
   const char *room = s.room == ROOM_CALM ? "calm" : (s.room == ROOM_TILTING ? "TILTING" : "floating");
@@ -930,7 +1126,7 @@ void drawBrain() {
   cv->print(buf);
 
   // How much Bloop expects each action to pay off right now
-  int y0 = HUD_H + 90;
+  int y0 = HUD_H + 86;
   float lo = -3, hi = 3;
   for (int a = 0; a < NUM_ACTIONS; a++) {
     float v = brain.q[curState][a];
@@ -940,29 +1136,29 @@ void drawBrain() {
   float span = fmaxf(fabsf(lo), fabsf(hi));
   int mid = 200, half = 105;
   for (int a = 0; a < NUM_ACTIONS; a++) {
-    int y = y0 + a * 17;
+    int y = y0 + a * 13;
     bool chosen = (a == pet.action);
     cv->setTextColor(chosen ? RGB565_WHITE : RGB565_LIGHTGREY);
-    cv->setCursor(10, y + 3);
+    cv->setCursor(10, y + 2);
     cv->print(chosen ? ">" : " ");
     cv->print(ACTION_NAMES[a]);
     float v = brain.q[curState][a];
     int w = (int)(fabsf(v) / span * half);
-    cv->drawFastVLine(mid, y, 13, RGB565_DARKGREY);
-    if (v >= 0) cv->fillRect(mid, y + 2, w, 9, rgb(80, 200, 140));
-    else cv->fillRect(mid - w, y + 2, w, 9, rgb(220, 80, 80));
+    cv->drawFastVLine(mid, y, 12, RGB565_DARKGREY);
+    if (v >= 0) cv->fillRect(mid, y + 2, w, 8, rgb(80, 200, 140));
+    else cv->fillRect(mid - w, y + 2, w, 8, rgb(220, 80, 80));
   }
 
-  int hy = y0 + NUM_ACTIONS * 17 + 8;
+  int hy = y0 + NUM_ACTIONS * 13 + 6;
   cv->setTextColor(RGB565_WHITE);
   cv->setCursor(10, hy);
   cv->print("Habits so far:");
   float sc;
   Action h;
-  h = brain.habit(habitTilt, &sc);       drawHabit(hy + 14, "When the room tilts:", h, sc);
-  h = brain.habit(habitHungryFood, &sc); drawHabit(hy + 26, "Hungry, food out:", h, sc);
-  h = brain.habit(habitTired, &sc);      drawHabit(hy + 38, "When tired:", h, sc);
-  h = brain.habit(habitFloat, &sc);      drawHabit(hy + 50, "In zero-g:", h, sc);
+  h = brain.habit(habitTilt, &sc);       drawHabit(hy + 12, "When the room tilts:", h, sc);
+  h = brain.habit(habitHungryFood, &sc); drawHabit(hy + 24, "Hungry, food out:", h, sc);
+  h = brain.habit(habitTired, &sc);      drawHabit(hy + 36, "When tired:", h, sc);
+  h = brain.habit(habitFloat, &sc);      drawHabit(hy + 48, "In zero-g:", h, sc);
 
   // Buttons
   cv->fillRoundRect(8, BTN_Y, 146, 38, 8, confirmReset ? rgb(220, 60, 60) : rgb(110, 40, 40));
@@ -1042,6 +1238,71 @@ void calTap(int x, int y) {
 
 // ============================================================ touch
 
+// ---- MORE menu ----
+const int MENU_X[2] = {12, 166}, MENU_Y0 = HUD_H + 70, MENU_BW = 142, MENU_BH = 70, MENU_GAP = 14;
+
+void menuButton(int col, int row, const char *title, const char *value, uint16_t color) {
+  int x = MENU_X[col], y = MENU_Y0 + row * (MENU_BH + MENU_GAP);
+  cv->fillRoundRect(x, y, MENU_BW, MENU_BH, 10, color);
+  cv->setTextSize(2);
+  cv->setTextColor(RGB565_WHITE);
+  cv->setCursor(x + 10, y + 14);
+  cv->print(title);
+  cv->setTextSize(1);
+  cv->setTextColor(rgb(230, 230, 240));
+  cv->setCursor(x + 10, y + 44);
+  cv->print(value);
+}
+
+void drawMenu() {
+  cv->fillRect(0, HUD_H, SCREEN_W, TOOLBAR_Y - HUD_H, rgb(16, 14, 26));
+  cv->setTextSize(2);
+  cv->setTextColor(rgb(150, 160, 255));
+  cv->setCursor(12, HUD_H + 14);
+  cv->print("MORE");
+  cv->setTextSize(1);
+  cv->setTextColor(RGB565_LIGHTGREY);
+  cv->setCursor(12, HUD_H + 40);
+  cv->print("Tap MORE again to go back to the room.");
+  char buf[32];
+  menuButton(0, 0, "BRAIN", "what Bloop has learned", rgb(80, 80, 160));
+  menuButton(1, 0, "LIGHTS", lightsOff ? "off: Bloop gets sleepy" : "on", lightsOff ? rgb(40, 40, 70) : rgb(190, 150, 40));
+  snprintf(buf, sizeof(buf), "now: %s", TOY_NAMES[toy]);
+  menuButton(0, 1, "TOY", buf, rgb(200, 60, 70));
+  menuButton(1, 1, "CLEAN UP", "remove all snacks", rgb(70, 120, 90));
+  menuButton(0, 2, "TILT SETUP", "which way is down", rgb(50, 70, 120));
+  snprintf(buf, sizeof(buf), "%s", pet.asleep ? "Bloop is asleep" : "send Bloop to bed");
+  menuButton(1, 2, "BEDTIME", buf, rgb(90, 70, 140));
+}
+
+void menuTap(int x, int y) {
+  int col = x < 160 ? 0 : 1;
+  int row = (y - MENU_Y0) / (MENU_BH + MENU_GAP);
+  if (y < MENU_Y0 || row > 2) return;
+  if ((y - MENU_Y0) % (MENU_BH + MENU_GAP) > MENU_BH) return;
+  int id = row * 2 + col;
+  switch (id) {
+    case 0: screen = SCR_BRAIN; break;
+    case 1: lightsOff = !lightsOff; prefs.putBool("dark", lightsOff); sendEvent(lightsOff ? "lights_off" : "lights_on", 0); break;
+    case 2: {
+      toy = (toy + 1) % NUM_TOYS;
+      prefs.putUChar("toy", toy);
+      float bx = ball.active ? ball.x : SCREEN_W / 2, by = ball.active ? ball.y : (ROOM_T + ROOM_B) / 2;
+      initToy(bx, by);
+      break;
+    }
+    case 3:
+      for (int i = 0; i < MAX_FOOD; i++) food[i].active = false;
+      break;
+    case 4: calStep = 0; calMsg = ""; screen = SCR_CAL; break;
+    case 5:
+      startAction(ACT_SLEEP);
+      sinceDecide = 0;
+      screen = SCR_ROOM;
+      break;
+  }
+}
+
 void toolbarTap(int i) {
   confirmReset = false;
   switch (i) {
@@ -1064,7 +1325,7 @@ void toolbarTap(int i) {
       sendEvent("no", -2.5f);
       break;
     case 4:
-      screen = (screen == SCR_BRAIN) ? SCR_ROOM : SCR_BRAIN;
+      screen = (screen == SCR_ROOM) ? SCR_MENU : SCR_ROOM;
       break;
   }
 }
@@ -1102,6 +1363,7 @@ void readTouch(float dt) {
     if (screen == SCR_CAL) { calTap(x, y); return; }
     if (y >= TOOLBAR_Y) { toolbarTap((int)(x / 64)); return; }
     if (screen == SCR_BRAIN) { brainTap(x, y); return; }
+    if (screen == SCR_MENU) { menuTap(x, y); return; }
 
     lastTouchMs = millis();
     if (vlen(v2(x - pet.body.x, y - pet.body.y)) < pet.body.r + 14) grabCand = GRAB_PET;
@@ -1153,7 +1415,8 @@ void readCommands() {
     if (c == '\n' || c == '\r') {
       cmdBuf[cmdLen] = 0;
       if (!strcmp(cmdBuf, "feed")) toolbarTap(0);
-      else if (!strcmp(cmdBuf, "ball")) toolbarTap(1);
+      else if (!strcmp(cmdBuf, "ball") || !strcmp(cmdBuf, "toy")) toolbarTap(1);
+      else if (!strcmp(cmdBuf, "lights")) { lightsOff = !lightsOff; prefs.putBool("dark", lightsOff); }
       else if (!strcmp(cmdBuf, "good")) toolbarTap(2);
       else if (!strcmp(cmdBuf, "no")) toolbarTap(3);
       else if (!strcmp(cmdBuf, "brain")) sendBrain();
@@ -1216,7 +1479,7 @@ void setup() {
 
   bodyInit(pet.body, BODY_PET, SCREEN_W / 2, ROOM_B - 40, 22, 0.22f, 7);
   bodyInit(bed, BODY_BED, ROOM_R - 50, ROOM_B - 30, 26, 0.1f, 6);
-  bodyInit(ball, BODY_BALL, ROOM_L + 60, ROOM_B - 30, 13, 0.8f, 0.8f);
+  initToy(ROOM_L + 60, ROOM_B - 30);
   for (int i = 0; i < MAX_FOOD; i++) food[i].active = false;
   for (int i = 0; i < MAX_PARTICLES; i++) parts[i].active = false;
   pet.action = ACT_SIT;
@@ -1262,8 +1525,22 @@ void loop() {
     pet.angle += dt * 0.6f;   // slowly tumbles in zero-g
   }
   if (pet.held) pet.angle += sinf(now / 90.0f) * 0.05f;  // wiggles when held
+  if (pet.action == ACT_DANCE && !pet.asleep) pet.angle += sinf(pet.danceT * 9) * 0.04f;
+
+  // The bed turns to stand on the floor too.
+  if (!floating) {
+    float want = atan2f(gScreen.y, gScreen.x);
+    float diff = want - bedAngle;
+    while (diff > PI) diff -= 2 * PI;
+    while (diff < -PI) diff += 2 * PI;
+    bedAngle += diff * clampf(dt * 5, 0, 1);
+  } else {
+    bedAngle += dt * 0.3f;
+  }
+  if (ball.active) toySpin += (ball.vx + ball.vy) * dt / (ball.r * 2.0f);
 
   if (screen == SCR_BRAIN) drawBrain();
+  else if (screen == SCR_MENU) drawMenu();
   else drawRoom();
   drawHud();
   drawToolbar();

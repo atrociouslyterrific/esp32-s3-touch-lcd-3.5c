@@ -135,7 +135,7 @@ inline float collide(Body &a, Body &b, float massA, float massB) {
 }
 
 // ---- Particles (hearts, stars, crumbs, dust) ----
-enum ParticleKind : uint8_t { PT_HEART, PT_STAR, PT_CRUMB, PT_DUST, PT_ZZZ };
+enum ParticleKind : uint8_t { PT_HEART, PT_STAR, PT_CRUMB, PT_DUST, PT_ZZZ, PT_NOTE };
 
 struct Particle {
   bool active;
