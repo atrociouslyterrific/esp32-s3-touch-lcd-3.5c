@@ -210,7 +210,7 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; margin-
 
     <section class="card span-6">
       <h2>Learning to talk</h2>
-      <p class="note">Training loss as GitHub trained the model. It drops as the model gets better at guessing Bloop's next word.</p>
+      <p class="note">Training loss as GitHub trained the model (from the point it drops below 4). It drops as the model gets better at guessing Bloop's next word.</p>
       <div class="chart" id="voiceLoss"></div>
     </section>
 
@@ -742,7 +742,8 @@ function drawVoiceLoss() {
   const box = document.getElementById("voiceLoss");
   box.replaceChildren();
   if (!voice || !voice.curve) { const d = document.createElement("div"); d.className = "empty"; d.textContent = "Training stats appear after GitHub trains the model."; box.appendChild(d); return; }
-  const pts = voice.curve.map((v, i) => ({ x: i * 25, y: v }));
+  // Skip the first few steps (loss starts very high) so the learning is visible.
+  const pts = voice.curve.map((v, i) => ({ x: i * 25, y: v })).filter((p, i, a) => p.y < 4 || i === a.length - 1);
   const W = 480, H = 220, m = { l: 40, r: 12, t: 12, b: 28 };
   const x1 = pts[pts.length - 1].x, y1 = Math.max(...pts.map(p => p.y)) * 1.05;
   const X = v => m.l + v / x1 * (W - m.l - m.r), Y = v => m.t + (1 - v / y1) * (H - m.t - m.b);

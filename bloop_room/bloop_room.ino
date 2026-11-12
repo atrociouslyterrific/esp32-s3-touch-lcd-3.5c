@@ -425,7 +425,10 @@ void onShake() {
   decideNow = true;
   sendEvent("shake", lastShakeMag);
   say(SAY_SHAKE, true);
+  visitorShake();
 }
+
+#include "visitor.h"   // Pip, the pet from the other board, comes over when the boards are together
 
 // ============================================================ the world
 
@@ -734,6 +737,7 @@ void updateWorld(float dt) {
 
   updateNeeds(dt);
   petBehave(dt);
+  visitorUpdate(dt);
 
   // Things worth mentioning
   static bool wasAsleep = false, wasFloating = false;
@@ -779,6 +783,7 @@ void updateWorld(float dt) {
     for (int i = 0; i < MAX_FOOD; i++)
       if (food[i].active) stepBody(food[i], g, h, floating);
     resolveContacts();
+    visitorStep(g, h);
   }
   if (physAcc > PHYS_DT * 4) physAcc = 0;   // don't spiral after a long pause
   eatAndPlay();
@@ -1164,6 +1169,7 @@ void drawRoom() {
   drawShadow();
   drawBloop();
   if (pet.asleep && nearBed(12)) drawBlanketOverBloop();
+  drawVisitor();
 
   // Particles
   for (int i = 0; i < MAX_PARTICLES; i++) {
@@ -1738,6 +1744,7 @@ void setup() {
   pet.look = v2(1, 0);
   pet.blinkT = 3;
 
+  visitorBegin();
   lastFrameMs = millis();
 }
 
