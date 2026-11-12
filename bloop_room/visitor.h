@@ -86,6 +86,11 @@ struct Visitor {
 };
 Visitor pip;
 
+// Defined further down (Pip's brain for getting about the room), used before that.
+void pipBrainLoad();
+void pipBrainSave();
+extern int pmState;
+
 uint32_t pipLessonsTotal = 0;   // every "Good Bloop!" / "No, Bloop!" Pip has ever given (saved on the board)
 uint32_t pipLessonsSaved = 0;   // the count that is in the board's memory right now
 float pipLessonsSaveT = 0;
@@ -255,6 +260,7 @@ void visitorBegin() {
   pip.enterT = pip.exitT = 0;
   pip.walkSecs = 1;
   pipLessonsTotal = pipLessonsSaved = prefs.getUInt("pipLessons", 0);
+  pipBrainLoad();
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   if (esp_now_init() != ESP_OK) return;
@@ -380,6 +386,8 @@ void visitorArrive() {
 void visitorLeave() {
   if (palPlace == PLACE_BLOOPS) visitorWalkOut();   // it hops out through the door
   visitorSaveLessons();
+  pipBrainSave();
+  pmState = -1;   // next visit starts a fresh choice
   pip.here = false;
   palPlace = PLACE_BLOOPS;   // Bloop is back in its own room
   for (int i = 0; i < 3; i++) palSend(false);
@@ -574,6 +582,144 @@ void visitorCoach(float dt) {
   coachWait = 1.0f;
 }
 
+// ---- Pip's brain for getting about Bloop's room ----
+// Pip's moves here aren't scripted. It has its own small brain that learns, the same
+// way Bloop's does (Q-learning, see brain.h): every few seconds it looks at its
+// situation, picks where to go, and later scores how that went.
+//   Situation: what Pip's real brain (on Pip's board) feels like doing right now
+//              (rest / play / be with someone / explore), whether Bloop is close,
+//              whether the toy is close, and whether the room is calm, tipping or floating.
+//   Choices:   go to Bloop, go to the toy, go to the bed, go to the window, wander, stay put.
+//   Score:     how Pip really feels afterwards (its board says: happy, scared, grumpy),
+//              what happened to it (fun with the toy, a cuddle, a bump, a shake), and
+//              whether the move suited what its real brain wanted.
+// It starts out clueless and tries things at random; what it learns is saved.
+enum PipMove : uint8_t { PM_BLOOP, PM_TOY, PM_BED, PM_WINDOW, PM_WANDER, PM_STAY, NUM_PM };
+const char *const PM_NAMES[NUM_PM] = {"to Bloop", "to the toy", "to the bed", "to the window", "wandering", "staying put"};
+enum : uint8_t { WANT_REST, WANT_PLAY, WANT_COMPANY, WANT_EXPLORE };
+const int PM_STATES = 4 * 2 * 2 * 3;
+float pipQ[PM_STATES][NUM_PM];
+uint32_t pipChoices = 0, pipChoicesSaved = 0;
+int pmState = -1;
+uint8_t pmMove = PM_STAY;
+bool pmExplored = false;
+float pmReward = 0;      // score collected since the last choice
+float pmT = 0;           // seconds until the next choice
+float pmSaveT = 0;
+Vec2 pmWander = {SCREEN_W / 2.0f, (ROOM_T + ROOM_B) / 2};
+
+uint8_t pipWants() {
+  switch (pip.action) {
+    case PIP_PLAY: case PIP_DANCE: case PIP_SING: return WANT_PLAY;
+    case PIP_CALL: case PIP_EAT: return WANT_COMPANY;
+    case PIP_EXPLORE: case PIP_WINDOW: return WANT_EXPLORE;
+    default: return WANT_REST;
+  }
+}
+
+int pipSituation() {
+  Body &b = pip.body;
+  bool bloopNear = vlen(v2(pet.body.x - b.x, pet.body.y - b.y)) < 90;
+  bool toyNear = ball.active && vlen(v2(ball.x - b.x, ball.y - b.y)) < 100;
+  int room = floating ? 2 : ((tiltRate > 0.7f || shakeT < 1.5f) ? 1 : 0);
+  return ((pipWants() * 2 + bloopNear) * 2 + toyNear) * 3 + room;
+}
+
+void pipBrainLoad() {
+  if (prefs.getBytesLength("pipQ") == sizeof(pipQ)) {
+    prefs.getBytes("pipQ", pipQ, sizeof(pipQ));
+    pipChoices = pipChoicesSaved = prefs.getUInt("pipChoices", 0);
+  } else {
+    memset(pipQ, 0, sizeof(pipQ));
+  }
+}
+
+void pipBrainSave() {
+  if (pipChoices == pipChoicesSaved) return;
+  prefs.putBytes("pipQ", pipQ, sizeof(pipQ));
+  prefs.putUInt("pipChoices", pipChoices);
+  pipChoicesSaved = pipChoices;
+}
+
+// Where the current choice is taking Pip.
+Vec2 pipGoal() {
+  switch (pmMove) {
+    case PM_BLOOP:  return v2(pet.body.x, pet.body.y);
+    case PM_TOY:    return ball.active ? v2(ball.x, ball.y) : pmWander;
+    case PM_BED:    return v2(bed.x, bed.y);
+    case PM_WINDOW: return v2(SCREEN_W / 2.0f, (ROOM_T + ROOM_B) / 2);   // under the window in the back wall
+    case PM_WANDER: return pmWander;
+    default:        return v2(pip.body.x, pip.body.y);
+  }
+}
+
+// Learn from the last choice, then make the next one.
+void pipBrainChoose() {
+  int st = pipSituation();
+  uint8_t wants = pipWants();
+  // Did the last move suit what Pip's real brain wanted?
+  if (wants == WANT_REST && (pmMove == PM_BED || pmMove == PM_STAY)) pmReward += 0.4f;
+  if (wants == WANT_PLAY && pmMove == PM_TOY) pmReward += 0.5f;
+  if (wants == WANT_COMPANY && pmMove == PM_BLOOP) pmReward += 0.5f;
+  if (wants == WANT_EXPLORE && (pmMove == PM_WINDOW || pmMove == PM_WANDER)) pmReward += 0.4f;
+
+  float best = pipQ[st][0];
+  for (int a = 1; a < NUM_PM; a++) best = fmaxf(best, pipQ[st][a]);
+  if (pmState >= 0) {
+    float &old = pipQ[pmState][pmMove];
+    old += 0.2f * (pmReward + 0.8f * best - old);
+    old = clampf(old, -20, 20);
+    pipChoices++;
+  }
+  pmReward = 0;
+
+  float eps = fmaxf(0.08f, 0.4f * expf(-(float)pipChoices / 300.0f));   // tries lots at first, less later
+  pmExplored = frand(0, 1) < eps;
+  if (pmExplored) {
+    pmMove = (uint8_t)(esp_random() % NUM_PM);
+  } else {
+    uint8_t ties[NUM_PM];
+    int n = 0;
+    for (int a = 0; a < NUM_PM; a++)
+      if (pipQ[st][a] >= best - 0.001f) ties[n++] = a;
+    pmMove = ties[esp_random() % n];
+  }
+  pmState = st;
+  pmWander = v2(frand(ROOM_L + 30, ROOM_R - 30), frand(ROOM_T + 30, ROOM_B - 30));
+  pmT = frand(2.6f, 3.6f);
+  sendEvent("pip_move", pmMove);
+}
+
+// Once a frame: score how Pip feels, choose when it's time, and hop toward the goal.
+void pipBrainTick(float dt) {
+  Body &b = pip.body;
+  bool asleep = pip.flags & PALF_ASLEEP;
+  // How Pip's own board says it feels is the heart of the score.
+  if (pip.flags & PALF_HAPPY) pmReward += 0.15f * dt;
+  if (pip.flags & PALF_SCARED) pmReward -= 0.30f * dt;
+  if (pip.flags & PALF_GRUMPY) pmReward -= 0.20f * dt;
+
+  pmT -= dt;
+  if (pmT <= 0 && !asleep) pipBrainChoose();
+  pmSaveT += dt;
+  if (pmSaveT > 300) { pmSaveT = 0; pipBrainSave(); }   // every 5 minutes (and when Pip leaves)
+
+  // Pip gets about by hopping along the floor.
+  uint8_t fw = floorWall(gScreen);
+  if (floating || asleep || !(b.touching & fw) || pip.hopCool > 0) return;
+  bool lively = pip.action == PIP_PLAY || pip.action == PIP_DANCE || pip.action == PIP_SING;
+  Vec2 n = wallNormal(fw), t = floorTangent(fw), goal = pipGoal();
+  float along = (goal.x - b.x) * t.x + (goal.y - b.y) * t.y;   // how far along the floor the goal is
+  bool there = fabsf(along) < 34;
+  if (there && pmMove != PM_STAY && pmMove != PM_BLOOP && pmMove != PM_TOY) { pip.hopCool = 0.6f; return; }   // arrived: sit
+  if (pmMove == PM_STAY && !lively) { pip.hopCool = 0.6f; return; }                                           // just sitting
+  float dir = there ? (frand(0, 1) < 0.5f ? -1.0f : 1.0f) : (along > 0 ? 1.0f : -1.0f);
+  float up = lively ? 300 : 210, push = there ? 40 : 125;
+  b.vx += n.x * up + t.x * dir * push;
+  b.vy += n.y * up + t.y * dir * push;
+  pip.hopCool = there ? (lively ? frand(0.5f, 1.0f) : frand(1.2f, 2.4f)) : frand(0.45f, 0.8f);
+}
+
 // ---- Pip feels what happens in the room ----
 float roomEvCool[NUM_ROOMEV] = {0};
 uint8_t roomEvSeq = 0;
@@ -585,6 +731,11 @@ void roomEvent(uint8_t kind, float strength, uint8_t feel, float feelSecs, const
   if (roomEvCool[kind] > 0) return;
   roomEvCool[kind] = cooldown;
   if (feel != FEEL_NONE) { pip.feel = feel; pip.feelT = feelSecs; }
+  // What happens to Pip also scores the move its brain last chose.
+  if (kind == ROOMEV_PLAY || kind == ROOMEV_CUDDLE) pmReward += 1.0f;
+  else if (kind == ROOMEV_BUMP) pmReward -= 1.0f;
+  else if (kind == ROOMEV_SHAKE) pmReward -= 0.5f;
+  else if (kind == ROOMEV_TILT) pmReward -= 0.3f;
   if (bubble && !(pip.flags & PALF_ASLEEP)) { pip.bubble = bubble; pip.bubbleT = 1.6f; }
   PalEvent m = {{'P', 'A', 'L', 'E'}, PAL_BLOOP, ++roomEvSeq, kind, (uint8_t)clampf(strength, 0, 100)};
   for (int i = 0; i < 2; i++) esp_now_send(PAL_EVERYONE, (const uint8_t *)&m, sizeof(m));
@@ -668,21 +819,11 @@ void visitorUpdate(float dt) {
   visitorSenses(dt);
 
   bool asleep = pip.flags & PALF_ASLEEP;
-  bool lively = pip.action == PIP_PLAY || pip.action == PIP_DANCE || pip.action == PIP_SING;
   float dx = pet.body.x - b.x, dy = pet.body.y - b.y;
   float dist = sqrtf(dx * dx + dy * dy);
 
-  // Pip gets about by hopping: over to Bloop, then on the spot beside it.
-  uint8_t fw = floorWall(gScreen);
-  if (!floating && !asleep && (b.touching & fw) && pip.hopCool <= 0) {
-    Vec2 n = wallNormal(fw), t = floorTangent(fw);
-    bool farOff = dist > 80;
-    float dir = farOff ? ((dx * t.x + dy * t.y) > 0 ? 1.0f : -1.0f) : (frand(0, 1) < 0.5f ? -1.0f : 1.0f);
-    float up = lively ? 300 : 210, along = farOff ? 120 : 45;
-    b.vx += n.x * up + t.x * dir * along;
-    b.vy += n.y * up + t.y * dir * along;
-    pip.hopCool = lively ? frand(0.5f, 1.0f) : frand(1.4f, 3.2f);
-  }
+  // Where Pip goes is up to its own brain (see "Pip's brain for getting about").
+  pipBrainTick(dt);
 
   // Bloop likes the company.
   pet.joy = clampf(pet.joy + 0.25f * dt, 0, 100);
@@ -823,7 +964,7 @@ void drawVisitor() {
   {
     char note[40];
     if (asleep) snprintf(note, sizeof(note), "Pip is napping: no lessons");
-    else snprintf(note, sizeof(note), "Pip is teaching Bloop: %lu", (unsigned long)pipLessonsTotal);
+    else snprintf(note, sizeof(note), "Pip: %s%s | lessons %lu", PM_NAMES[pmMove], pmExplored ? "?" : "", (unsigned long)pipLessonsTotal);
     cv->setFont((const GFXfont *)NULL);
     cv->setTextSize(1);
     int nx = SCREEN_W / 2 - (int)strlen(note) * 3, ny = (int)ROOM_B - 10;
