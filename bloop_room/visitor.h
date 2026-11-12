@@ -40,7 +40,23 @@ struct __attribute__((packed)) PalSay {
   uint8_t replyTo;    // the other pet's line this answers (0 = starts a new topic)
   char text[58];      // what was said, ending in a 0 byte
 };
-enum : uint8_t { PALF_SAD = 1, PALF_ASLEEP = 2 };
+enum : uint8_t { PALF_SAD = 1, PALF_ASLEEP = 2, PALF_SCARED = 4, PALF_GRUMPY = 8, PALF_HAPPY = 16 };
+
+// Something that happens to Pip in Bloop's room ("PALE"). Bloop's board tells Pip's
+// board, and Pip's real feelings change (how much depends on its personality), so
+// its mood here, on its own screen and in what it says all follow.
+// Must match the copy in PipAI.ino.
+enum : uint8_t { ROOMEV_SHAKE = 1, ROOMEV_BUMP, ROOMEV_TILT, ROOMEV_FLOAT, ROOMEV_DARK, ROOMEV_LIGHT,
+                 ROOMEV_PLAY, ROOMEV_CUDDLE, NUM_ROOMEV };
+struct __attribute__((packed)) PalEvent {
+  uint8_t magic[4];   // "PALE"
+  uint8_t who;        // PAL_BLOOP
+  uint8_t seq;        // a new number for each event
+  uint8_t kind;       // ROOMEV_*
+  uint8_t strength;   // 0..100
+};
+// The face Pip pulls right away, before its own board has caught up.
+enum : uint8_t { FEEL_NONE, FEEL_SCARED, FEEL_OUCH, FEEL_WHEE, FEEL_SLEEPY };
 // Pip's actions, in the order of PipAction in pip_world.h
 enum : uint8_t { PIP_IDLE, PIP_NAP, PIP_EAT, PIP_EXPLORE, PIP_PLAY, PIP_SING, PIP_HIDE,
                  PIP_WARM_UP, PIP_COOL_DOWN, PIP_CALL, PIP_DANCE, PIP_WINDOW };
@@ -58,6 +74,8 @@ struct Visitor {
   uint8_t action, flags;
   float hopCool, heartCool, bubbleT;
   const char *bubble;
+  uint8_t feel;             // FEEL_*: its reaction to what just happened in the room
+  float feelT;              // seconds that reaction lasts
   uint32_t seenDecisions;   // Bloop's choice count when Pip last looked
   float coachT;             // counts down to Pip judging Bloop's newest choice
   float coachCool;          // Pip doesn't comment on everything
@@ -260,6 +278,8 @@ void visitorArrive() {
   palPlace = PLACE_BLOOPS;
   placeT = frand(50, 75);
   pip.hopCool = 1.5f;
+  pip.feel = FEEL_NONE;
+  pip.feelT = 0;
   pip.heartCool = 2.0f;
   pip.bubble = "Hi Bloop!";
   pip.bubbleT = 3.0f;
@@ -478,6 +498,45 @@ void visitorCoach(float dt) {
   coachWait = 1.0f;
 }
 
+// ---- Pip feels what happens in the room ----
+float roomEvCool[NUM_ROOMEV] = {0};
+uint8_t roomEvSeq = 0;
+float pipBallHit = 0;   // hardest knock from the toy since the last frame
+
+// Something happened to Pip: pull a face, maybe say something, and tell Pip's board.
+// `cooldown` stops the same thing being reported over and over.
+void roomEvent(uint8_t kind, float strength, uint8_t feel, float feelSecs, const char *bubble, float cooldown) {
+  if (roomEvCool[kind] > 0) return;
+  roomEvCool[kind] = cooldown;
+  if (feel != FEEL_NONE) { pip.feel = feel; pip.feelT = feelSecs; }
+  if (bubble && !(pip.flags & PALF_ASLEEP)) { pip.bubble = bubble; pip.bubbleT = 1.6f; }
+  PalEvent m = {{'P', 'A', 'L', 'E'}, PAL_BLOOP, ++roomEvSeq, kind, (uint8_t)clampf(strength, 0, 100)};
+  for (int i = 0; i < 2; i++) esp_now_send(PAL_EVERYONE, (const uint8_t *)&m, sizeof(m));
+  sendEvent("pip_feels", kind);
+}
+
+// Once a frame while Pip is in Bloop's room: notice what the room is doing to it.
+void visitorSenses(float dt) {
+  static bool wasFloating = false, wasDark = false;
+  Body &b = pip.body;
+  for (int i = 0; i < NUM_ROOMEV; i++) roomEvCool[i] -= dt;
+  pip.feelT -= dt;
+  if (pip.feelT <= 0) pip.feel = FEEL_NONE;
+
+  if (b.impact > 380) roomEvent(ROOMEV_BUMP, (b.impact - 300) / 5, FEEL_OUCH, 2.0f, "Ouch!", 3);
+  b.impact = 0;
+  if (!floating && tiltRate > 0.9f) roomEvent(ROOMEV_TILT, 60, FEEL_SCARED, 1.5f, "Hold on!", 6);
+  if (floating && !wasFloating) roomEvent(ROOMEV_FLOAT, 100, FEEL_WHEE, 3.0f, "I'm floating!", 10);
+  wasFloating = floating;
+  if (lightsOff != wasDark) {
+    if (lightsOff) roomEvent(ROOMEV_DARK, 100, FEEL_SLEEPY, 4.0f, "So dark...", 2);
+    else roomEvent(ROOMEV_LIGHT, 100, FEEL_NONE, 0, "Oh! Light!", 2);
+    wasDark = lightsOff;
+  }
+  if (pipBallHit > 120) roomEvent(ROOMEV_PLAY, pipBallHit / 4, FEEL_WHEE, 1.5f, "Boing!", 5);
+  pipBallHit = 0;
+}
+
 void bloopPuff() {
   for (int k = 0; k < 8; k++)
     spawnParticle(PT_STAR, pet.body.x + frand(-22, 22), pet.body.y + frand(-22, 22),
@@ -532,6 +591,7 @@ void visitorUpdate(float dt) {
   pip.bubbleT -= dt;
   visitorCoach(dt);
   visitorTalk(dt);
+  visitorSenses(dt);
 
   bool asleep = pip.flags & PALF_ASLEEP;
   bool lively = pip.action == PIP_PLAY || pip.action == PIP_DANCE || pip.action == PIP_SING;
@@ -554,6 +614,7 @@ void visitorUpdate(float dt) {
   pet.joy = clampf(pet.joy + 0.25f * dt, 0, 100);
   if (dist < 75 && !asleep && !pet.asleep && pip.heartCool <= 0) {
     pip.heartCool = frand(2.5f, 5.0f);
+    roomEvent(ROOMEV_CUDDLE, 100, FEEL_NONE, 0, nullptr, 15);
     pet.joy = clampf(pet.joy + 2, 0, 100);
     spawnParticle(PT_HEART, (b.x + pet.body.x) / 2, (b.y + pet.body.y) / 2 - 22, frand(-15, 15), -55, 1.0f, rgb(255, 90, 140));
   }
@@ -569,7 +630,7 @@ void visitorStep(Vec2 g, float h) {
   Body &b = pip.body;
   stepBody(b, g, h, floating);
   if (!pet.held && !pet.gripping) collide(pet.body, b, 3.0f, 2.0f);
-  if (ball.active) collide(b, ball, 2.0f, 1.0f);
+  if (ball.active) pipBallHit = fmaxf(pipBallHit, collide(b, ball, 2.0f, 1.0f));
   collideBox(b, bed, 2.0f, 4.0f);
   for (int i = 0; i < MAX_FOOD; i++)
     if (food[i].active) collide(b, food[i], 2.0f, 0.3f);
@@ -579,8 +640,7 @@ void visitorShake() {
   if (!pip.here || palPlace == PLACE_PIPS) return;
   pip.body.vx += frand(-420, 420);
   pip.body.vy += frand(-420, 420);
-  pip.bubble = "Whoa!";
-  pip.bubbleT = 1.5f;
+  roomEvent(ROOMEV_SHAKE, 100, FEEL_SCARED, 2.5f, "Whoa!", 2);
 }
 
 // Pip looks like it does on its own e-paper screen: a white blob with a thick
@@ -622,14 +682,55 @@ void drawVisitor() {
 
   // It looks toward Bloop.
   float look = ((pet.body.x - b.x) * r.x + (pet.body.y - b.y) * r.y) > 0 ? 2 : -2;
+  // Its mood: what just happened to it here, or else how Pip's own board says it feels.
+  uint8_t feel = pip.feel;
+  if (feel == FEEL_NONE) {
+    if (pip.flags & PALF_SCARED) feel = FEEL_SCARED;
+    else if (pip.flags & PALF_GRUMPY) feel = FEEL_OUCH;
+    else if (pip.flags & PALF_HAPPY) feel = FEEL_WHEE;
+  }
+  if (asleep && pip.feel == FEEL_NONE) feel = FEEL_NONE;   // a sleeping face, unless something just woke it
   for (int s = -1; s <= 1; s += 2) {
     float ex = s * 6 + look;
-    if (asleep) { line(ex - 3, -2, ex + 3, -2, ink); continue; }
     Vec2 e = P(ex, -2), hl = P(ex + 1, -3);
-    cv->fillCircle(e.x, e.y, 3, ink);
-    cv->drawPixel(hl.x, hl.y, paper);
+    if (feel == FEEL_SCARED) {            // wide eyes
+      cv->fillCircle(e.x, e.y, 4, ink);
+      cv->fillCircle(e.x, e.y, 3, paper);
+      cv->fillCircle(e.x, e.y, 1, ink);
+    } else if (feel == FEEL_OUCH) {       // cross brows over small eyes
+      cv->fillCircle(e.x, e.y, 2, ink);
+      line(ex - s * 4, -7, ex + s * 3, -5, ink);
+    } else if (feel == FEEL_WHEE) {       // ^ ^
+      line(ex - 3, -1, ex, -4, ink); line(ex, -4, ex + 3, -1, ink);
+    } else if (feel == FEEL_SLEEPY) {     // half shut
+      line(ex - 3, -3, ex + 3, -3, ink);
+      Vec2 lid = P(ex, -1);
+      cv->fillCircle(lid.x, lid.y, 1, ink);
+    } else if (asleep) {
+      line(ex - 3, -2, ex + 3, -2, ink);
+    } else {
+      cv->fillCircle(e.x, e.y, 3, ink);
+      cv->drawPixel(hl.x, hl.y, paper);
+    }
   }
-  if (asleep) {
+  if (feel == FEEL_SCARED) {              // a small "o"
+    Vec2 m = P(look, 8);
+    cv->fillCircle(m.x, m.y, 3, ink);
+    cv->fillCircle(m.x, m.y, 1, paper);
+    Vec2 d0 = P(b.r - 5, -b.r + 6), d1 = P(b.r - 8, -b.r + 12), d2 = P(b.r - 2, -b.r + 12);   // sweat drop
+    cv->fillTriangle(d0.x, d0.y, d1.x, d1.y, d2.x, d2.y, rgb(120, 190, 255));
+  } else if (feel == FEEL_OUCH) {         // flat, unimpressed
+    line(look - 4, 8, look + 4, 8, ink);
+  } else if (feel == FEEL_WHEE) {         // big open smile
+    Vec2 m = P(look, 7);
+    cv->fillCircle(m.x, m.y, 4, ink);
+    Vec2 t = P(look, 5);
+    cv->fillCircle(t.x, t.y, 3, paper);
+    line(look - 5, 5, look - 3, 8, ink); line(look + 3, 8, look + 5, 5, ink);
+  } else if (feel == FEEL_SLEEPY) {       // a yawn
+    Vec2 m = P(look, 8);
+    cv->fillCircle(m.x, m.y, 2, ink);
+  } else if (asleep) {
     Vec2 m = P(look, 7);
     cv->fillCircle(m.x, m.y, 1, ink);
   } else if (pip.action == PIP_SING || pip.action == PIP_DANCE || pip.action == PIP_CALL) {
