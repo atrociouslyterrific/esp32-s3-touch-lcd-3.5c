@@ -19,6 +19,7 @@
 #include "world.h"
 #include "brain.h"
 #include "dream.h"
+#include "backup.h"
 #include "FreeSans9pt7b.h"
 #include "FreeSansBold9pt7b.h"
 #include "FreeSansBold12pt7b.h"
@@ -151,7 +152,7 @@ bool confirmReset = false;
 float saveTimer = 0;
 float physAcc = 0;
 float brainSendTimer = 0;
-char cmdBuf[24];
+char cmdBuf[600];   // long enough for a line of a restored backup
 int cmdLen = 0;
 uint32_t lastFrameMs = 0;
 
@@ -961,7 +962,7 @@ void updateWorld(float dt) {
   if (sinceDecide > 2.2f || (decideNow && sinceDecide > 0.4f)) think();
 
   saveTimer += dt;
-  if (saveTimer > 90) { saveTimer = 0; saveAll(); }
+  if (saveTimer > 90 && !restoring) { saveTimer = 0; saveAll(); }
 
   brainSendTimer += dt;
   if (brainSendTimer > 8) { brainSendTimer = 0; sendBrain(); }
@@ -1901,6 +1902,8 @@ void readCommands() {
       else if (!strcmp(cmdBuf, "good")) toolbarTap(2);
       else if (!strcmp(cmdBuf, "no")) toolbarTap(3);
       else if (!strcmp(cmdBuf, "brain")) sendBrain();
+      else if (!strcmp(cmdBuf, "backup")) { saveAll(); backupDump(); }
+      else restoreCommand(cmdBuf);
       cmdLen = 0;
     } else if (cmdLen < (int)sizeof(cmdBuf) - 1) {
       cmdBuf[cmdLen++] = c;
@@ -1922,6 +1925,7 @@ void sendBootReport() {
 }
 
 void setup() {
+  Serial.setRxBufferSize(2048);   // room for restore lines from the website
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);   // never stall the game when no computer is listening
   boardSt = boardPowerUp(expander, pmu);

@@ -182,6 +182,16 @@ a { color: var(--series-1); }
       <p class="warn" id="noSerial" hidden>This browser can't talk to USB devices. Use Chrome or Edge on a computer.</p>
     </section>
 
+    <section class="card span-12">
+      <h2>Bloop's memory</h2>
+      <p class="note">Save everything Bloop has stored (its brain, dream lessons, stats, settings, Pip's lessons) to a file on this computer, and put it back later. Installing other programs from this page doesn't erase Bloop's memory, but a backup is the safe way to keep it. Connect to Bloop first.</p>
+      <div class="row">
+        <button id="backupBtn" disabled>Back up Bloop</button>
+        <label class="btn ghost" id="restoreLabel" style="cursor:pointer;opacity:.4">Restore from a backup<input type="file" id="restoreFile" accept=".json,application/json" hidden disabled></label>
+        <span class="note" id="backupStatus" style="margin:0"></span>
+      </div>
+    </section>
+
     <section class="span-12">
       <div class="tiles">
         <div class="tile"><div class="label">Choices learned from</div><div class="value" id="tDecisions">–</div><div class="hint">every choice updates its brain</div></div>
@@ -865,6 +875,9 @@ function handleLine(line) {
     if (history.length % 10 === 0) saveHistory();
   } else if (m.t === "q" && Array.isArray(m.q) && m.q.length === NUM_STATES * NA) {
     q = m.q;
+  } else if (m.t === "bk") {
+    onBackupLine(m);
+    return;
   } else if (m.t === "say") {
     const feels = last ? describe(last.s).split(", ") : null;
     sayings.push({ text: m.text, ev: m.ev, who: m.who || "bloop", time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), feels: null });
@@ -877,6 +890,59 @@ function handleLine(line) {
   queueDraw();
 }
 
+// ---------- Backup / restore of Bloop's memory ----------
+let backup = null, ackWaiter = null;
+
+function onBackupLine(m) {
+  if (m.begin) { backup = []; setText("backupStatus", "Copying Bloop's memory…"); return; }
+  if (m.ns !== undefined && backup) { backup.push({ ns: m.ns, k: m.k, ty: m.ty, v: m.v }); return; }
+  if (m.end !== undefined && backup) {
+    if (m.end !== backup.length) { setText("backupStatus", "Backup incomplete (" + backup.length + " of " + m.end + " items). Try again."); backup = null; return; }
+    const file = { app: "bloop", saved: new Date().toISOString(), build: BUILD, items: backup };
+    const blob = new Blob([JSON.stringify(file, null, 1)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "bloop-backup-" + new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-") + ".json";
+    a.click();
+    setText("backupStatus", "Saved " + backup.length + " items to " + a.download + ".");
+    backup = null;
+    return;
+  }
+  if (m.ok !== undefined && ackWaiter) { const w = ackWaiter; ackWaiter = null; w(m); }
+}
+
+function sendAndWait(line) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { ackWaiter = null; reject(new Error("Bloop didn't answer")); }, 4000);
+    ackWaiter = m => { clearTimeout(timer); m.ok ? resolve(m) : reject(new Error("Bloop couldn't store an item (" + (m.why || "?") + ")")); };
+    send(line);
+  });
+}
+
+async function restoreFrom(file) {
+  let data;
+  try { data = JSON.parse(await file.text()); } catch (e) { setText("backupStatus", "That file isn't a Bloop backup."); return; }
+  if (!data || data.app !== "bloop" || !Array.isArray(data.items)) { setText("backupStatus", "That file isn't a Bloop backup."); return; }
+  if (!confirm("Replace Bloop's current memory with the backup from " + new Date(data.saved).toLocaleString() + "? Bloop restarts afterwards.")) return;
+  try {
+    let n = 0;
+    for (const it of data.items) {
+      setText("backupStatus", "Restoring " + (++n) + " of " + data.items.length + "…");
+      if (it.ty === "blob") {
+        await sendAndWait(`rb ${it.ns} ${it.k} ${it.v.length / 2}`);
+        for (let i = 0; i < it.v.length; i += 400) await sendAndWait("rd " + it.v.slice(i, i + 400));
+        await sendAndWait("re");
+      } else {
+        await sendAndWait(`rs ${it.ns} ${it.k} ${it.ty} ${it.v}`);
+      }
+    }
+    await sendAndWait("rdone").catch(() => {});
+    setText("backupStatus", "Restored " + data.items.length + " items. Bloop is restarting; connect again in a few seconds.");
+  } catch (e) {
+    setText("backupStatus", "Restore stopped: " + e.message + ". Bloop's memory may be partly restored; try again.");
+  }
+}
+
 // ---------- Web Serial ----------
 const connectBtn = document.getElementById("connectBtn");
 let port = null, reading = false;
@@ -886,6 +952,9 @@ function setConnected(on, text) {
   setText("statusText", text);
   connectBtn.textContent = on ? "Disconnect" : "Connect to Bloop";
   document.querySelectorAll(".cmd").forEach(b => b.disabled = !on);
+  document.getElementById("backupBtn").disabled = !on;
+  document.getElementById("restoreFile").disabled = !on;
+  document.getElementById("restoreLabel").style.opacity = on ? 1 : 0.4;
 }
 
 async function connect() {
@@ -919,7 +988,7 @@ async function readLoop() {
       buf += value;
       let i;
       while ((i = buf.indexOf("\n")) >= 0) { handleLine(buf.slice(0, i)); buf = buf.slice(i + 1); }
-      if (buf.length > 20000) buf = "";
+      if (buf.length > 200000) buf = "";
     }
   } catch (e) {}
   try { reader.releaseLock(); } catch (e) {}
@@ -946,6 +1015,8 @@ if (!("serial" in navigator)) {
   connectBtn.disabled = true;
 }
 connectBtn.addEventListener("click", connect);
+document.getElementById("backupBtn").addEventListener("click", () => { setText("backupStatus", "Asking Bloop…"); send("backup"); });
+document.getElementById("restoreFile").addEventListener("change", e => { const f = e.target.files[0]; e.target.value = ""; if (f) restoreFrom(f); });
 document.querySelectorAll(".cmd").forEach(b => b.addEventListener("click", () => send(b.dataset.cmd)));
 document.getElementById("clearBtn").addEventListener("click", () => { history = []; saveHistory(); redrawAll(); });
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redrawAll);
