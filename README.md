@@ -29,6 +29,7 @@ Bloop is a pet that lives in a room you can tip over, and it learns by itself.
 | Folder | What it does |
 |---|---|
 | `bloop_room` | Bloop's Room (above). |
+| `imu_recorder` | **IMU Recorder.** Records the motion sensor (acceleration and rotation) to a microSD card. Pick 25, 50, 100 or 200 samples a second and tap REC; live graphs show the data. Each recording is a CSV file in the card's `/imu` folder (`rec_0001_100Hz.csv`) with columns `time_s, ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps` (±8 g, ±1024 °/s, the sensor chip's own axes). Saved every second, so a power cut loses at most a second. Install it from the website. |
 | `hello_touch` | Screen and touch test. Shows a title and color bars, prints the touch position, and lets you draw with your finger. Tap a swatch to change the pen color, or **CLEAR** to wipe the screen. |
 
 ## Hardware
