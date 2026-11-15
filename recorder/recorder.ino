@@ -1151,12 +1151,31 @@ void nextOrientation() {
   applyOrientation();
 }
 
+// Touch is read 50 times a second (it used to be read on every loop, hundreds of
+// times a second, over I2C wires shared with the motion sensor and camera). A press
+// only counts once the finger has been seen on 3 readings in a row (40 ms) in about
+// the same place: a single bad reading used to press REC by itself.
 void handleTouch() {
   if (!touchOk) return;
+  static uint32_t lastPoll = 0, lastFire = 0;
+  static int streak = 0, upStreak = 0, sx = 0, sy = 0;
+  static bool fired = false;
+  if (millis() - lastPoll < 20) return;
+  lastPoll = millis();
   int16_t xs[1], ys[1];
-  bool down = touch.getPoint(xs, ys, 1) > 0;
-  if (down && !wasDown) {
-    int x = xs[0], y = ys[0] - LOW_Y;
+  bool down = touch.getPoint(xs, ys, 1) > 0 && xs[0] >= 0 && xs[0] < SCREEN_W && ys[0] >= 0 && ys[0] < 480;
+  // Lifted only after 3 empty readings, so one missed reading mid-press can't press again.
+  if (!down) { streak = 0; if (++upStreak >= 3) { fired = false; wasDown = false; } return; }
+  upStreak = 0;
+  if (streak > 0 && (abs(xs[0] - sx) > 30 || abs(ys[0] - sy) > 30)) streak = 0;   // jumped: start over
+  if (streak == 0) { sx = xs[0]; sy = ys[0]; }
+  streak++;
+  wasDown = true;
+  if (fired || streak < 3 || millis() - lastFire < 600) return;
+  fired = true;   // once per press
+  lastFire = millis();
+  {
+    int x = sx, y = sy - LOW_Y;
     if (y >= REC_Y && y <= REC_Y + 46) {
       if (recording) stopRecording();
       else startRecording();
