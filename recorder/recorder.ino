@@ -495,8 +495,11 @@ void wifiPoll() {
   // To the website
   if (Serial) {
     Serial.print("{\"t\":\"wifi\",\"n\":[");
-    for (int i = 0; i < netCount; i++)
-      Serial.printf("%s[\"%s\",%d,%d,%d]", i ? "," : "", nets[i].ssid, nets[i].rssi, nets[i].ch, nets[i].open ? 1 : 0);
+    for (int i = 0; i < netCount; i++) {
+      const uint8_t *b = nets[i].bssid;
+      Serial.printf("%s[\"%s\",%d,%d,%d,\"%02X:%02X:%02X:%02X:%02X:%02X\"]", i ? "," : "", nets[i].ssid, nets[i].rssi, nets[i].ch,
+                    nets[i].open ? 1 : 0, b[0], b[1], b[2], b[3], b[4], b[5]);
+    }
     Serial.println("]}");
   }
   // To the card, while recording
@@ -512,9 +515,9 @@ void wifiPoll() {
       char bssid[18];
       snprintf(bssid, sizeof(bssid), "%02X:%02X:%02X:%02X:%02X:%02X", w.bssid[0], w.bssid[1], w.bssid[2], w.bssid[3], w.bssid[4], w.bssid[5]);
       if (clockKnown)
-        len += snprintf(wifiRows + len, sizeof(wifiRows) - len, "%.3f,%lld,%s,%s,%s,%d,%d,%s\n", secs, u, when, w.ssid, bssid, w.ch, w.rssi, w.open ? "open" : "locked");
+        len += snprintf(wifiRows + len, sizeof(wifiRows) - len, "%.3f,%lld,%s,%s,%d,%s,%d,%s\n", secs, u, when, bssid, w.rssi, w.ssid, w.ch, w.open ? "open" : "locked");
       else
-        len += snprintf(wifiRows + len, sizeof(wifiRows) - len, "%.3f,,,%s,%s,%d,%d,%s\n", secs, w.ssid, bssid, w.ch, w.rssi, w.open ? "open" : "locked");
+        len += snprintf(wifiRows + len, sizeof(wifiRows) - len, "%.3f,,,%s,%d,%s,%d,%s\n", secs, bssid, w.rssi, w.ssid, w.ch, w.open ? "open" : "locked");
     }
     wifiRowsLen = len;
     wifiRowsReady = len > 0;
@@ -597,7 +600,7 @@ void writerTask(void *) {
         char path[72];
         snprintf(path, sizeof(path), "%s_wifi.csv", baseName);
         wifiFile = SD_MMC.open(path, FILE_WRITE);
-        if (wifiFile) wifiFile.print("time_s,unix_ms,local_time,ssid,bssid,channel,rssi_dbm,security\n");
+        if (wifiFile) wifiFile.print("time_s,unix_ms,local_time,mac,rssi_dbm,ssid,channel,security\n");
       }
       if (wifiFile) wifiFile.write((const uint8_t *)wifiRows, wifiRowsLen);
       wifiRowsReady = false;

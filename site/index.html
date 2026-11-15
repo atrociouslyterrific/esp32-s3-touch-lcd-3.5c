@@ -219,11 +219,14 @@ a { color: var(--series-1); }
     </section>
 
     <section class="card span-12">
-      <h2>Nearby Wi-Fi</h2>
+      <div class="row" style="justify-content:space-between;margin-bottom:4px">
+        <h2 style="margin:0">Nearby Wi-Fi</h2>
+        <button class="ghost" id="wifiCsvBtn" disabled>Download scans (CSV)</button>
+      </div>
       <p class="note" id="wifiNote">Turn on <b>Wi-Fi</b> in the Recorder (bottom row of buttons) while connected, and the networks it hears show up here, every 5 seconds. Strongest first. The board only listens; it doesn't join any network.</p>
       <table class="recent">
-        <thead><tr><th>Network</th><th>Signal</th><th style="text-align:right">dBm</th><th style="text-align:right">Channel</th><th>Security</th></tr></thead>
-        <tbody id="wifiRows"><tr><td colspan="5" class="empty">No scan yet.</td></tr></tbody>
+        <thead><tr><th>Network</th><th>MAC address</th><th style="text-align:right">dBm</th><th>Signal</th><th style="text-align:right">Channel</th><th>Security</th></tr></thead>
+        <tbody id="wifiRows"><tr><td colspan="6" class="empty">No scan yet.</td></tr></tbody>
       </table>
     </section>
 
@@ -1048,20 +1051,46 @@ function downloadImuCsv() {
 document.getElementById("imuCsvBtn").addEventListener("click", downloadImuCsv);
 
 // ---------- nearby Wi-Fi (from the Recorder's scans) ----------
+// Every scan this page has seen (last 30 minutes), for the CSV download
+let wifiLog = [];
+function downloadWifiCsv() {
+  if (!wifiLog.length) return;
+  const rows = ["local_time,unix_ms,mac,rssi_dbm,ssid,channel,security"];
+  for (const s of wifiLog) {
+    const d = new Date(s.wall);
+    const local = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0") +
+      " " + clockText(s.wall, true);
+    for (const [name, rssi, ch, open, mac] of s.list)
+      rows.push([local, s.wall, mac || "", rssi, '"' + String(name).replace(/"/g, '""') + '"', ch, open ? "open" : "locked"].join(","));
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([rows.join("\n") + "\n"], { type: "text/csv" }));
+  a.download = "wifi-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".csv";
+  a.click();
+}
+document.getElementById("wifiCsvBtn").addEventListener("click", downloadWifiCsv);
+
 function onWifi(list) {
+  const nowWall = Date.now();
+  wifiLog.push({ wall: nowWall, list });
+  while (wifiLog.length && wifiLog[0].wall < nowWall - 1800000) wifiLog.shift();
+  document.getElementById("wifiCsvBtn").disabled = false;
   const tb = document.getElementById("wifiRows");
   tb.replaceChildren();
   setText("wifiNote", list.length + " networks heard at " + clockText(Date.now(), false) +
     ". Strongest first; updates every 5 seconds while the Recorder's Wi-Fi is on.");
   if (!list.length) {
     const tr = document.createElement("tr");
-    const td = document.createElement("td"); td.colSpan = 5; td.className = "empty"; td.textContent = "No networks heard.";
+    const td = document.createElement("td"); td.colSpan = 6; td.className = "empty"; td.textContent = "No networks heard.";
     tr.appendChild(td); tb.appendChild(tr);
     return;
   }
-  for (const [name, rssi, ch, open] of list) {
+  for (const [name, rssi, ch, open, mac] of list) {
     const tr = document.createElement("tr");
     const tdName = document.createElement("td"); tdName.textContent = name;
+    const tdMac = document.createElement("td");
+    tdMac.style.cssText = "font-family:ui-monospace,Menlo,monospace;font-size:13px";
+    tdMac.textContent = mac || "update the Recorder";
     // Signal as 4 bars, plus a word so it isn't colour-only
     const bars = rssi >= -55 ? 4 : rssi >= -67 ? 3 : rssi >= -78 ? 2 : 1;
     const tdSig = document.createElement("td");
@@ -1076,7 +1105,7 @@ function onWifi(list) {
     const tdDb = document.createElement("td"); tdDb.className = "n"; tdDb.textContent = rssi;
     const tdCh = document.createElement("td"); tdCh.className = "n"; tdCh.textContent = ch;
     const tdSec = document.createElement("td"); tdSec.textContent = open ? "open" : "locked";
-    tr.append(tdName, tdSig, tdDb, tdCh, tdSec);
+    tr.append(tdName, tdMac, tdDb, tdSig, tdCh, tdSec);
     tb.appendChild(tr);
   }
 }
