@@ -69,6 +69,8 @@ jobs:
       - name: Compile the sketches
         run: |
           for sketch in hello_touch bloop_room imu_recorder; do
+            # Stamp this build's version into the program (the board reports it to the website).
+            echo "#define FIRMWARE_BUILD \"${GITHUB_SHA::7}\"" > "$sketch/build_info.h"
             echo "::group::$sketch"
             arduino-cli compile --fqbn "$FQBN" --warnings default --output-dir "build/$sketch" "$sketch"
             echo "::endgroup::"

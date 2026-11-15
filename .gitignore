@@ -5,3 +5,4 @@ build/
 bloop_room/voice_weights.h
 training/out/
 __pycache__/
+build_info.h

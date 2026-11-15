@@ -879,6 +879,9 @@ function handleLine(line) {
     if (history.length % 10 === 0) saveHistory();
   } else if (m.t === "q" && Array.isArray(m.q) && m.q.length === NUM_STATES * NA) {
     q = m.q;
+  } else if (m.t === "hi") {
+    onVersion(m);
+    return;
   } else if (m.t === "bk") {
     onBackupLine(m);
     return;
@@ -895,10 +898,29 @@ function handleLine(line) {
 }
 
 // ---------- Backup / restore of Bloop's memory ----------
-let backup = null, ackWaiter = null;
+let backup = null, ackWaiter = null, backupTimer = null;
+let boardBuild = null, versionTimer = null;
+
+const OLD_FIRMWARE = "Bloop on your board is older than this page (it doesn't know about backups yet). Click Install Bloop above to update it; its memory is kept. Then connect again.";
+
+function onVersion(m) {
+  boardBuild = m.build;
+  clearTimeout(versionTimer);
+  if (m.app !== "bloop") { setText("statusText", "Connected (not Bloop)"); return; }
+  const same = m.build === BUILD || BUILD.startsWith("__");
+  setText("statusText", "Connected: Bloop build " + m.build + (same ? "" : " (update available)"));
+  if (!same) setText("backupStatus", "Bloop on the board is build " + m.build + "; this page has " + BUILD + ". Click Install Bloop to update (its memory is kept).");
+}
+
+function askVersion() {
+  boardBuild = null;
+  send("version");
+  clearTimeout(versionTimer);
+  versionTimer = setTimeout(() => { if (!boardBuild) setText("backupStatus", OLD_FIRMWARE); }, 4000);
+}
 
 function onBackupLine(m) {
-  if (m.begin) { backup = []; setText("backupStatus", "Copying Bloop's memory…"); return; }
+  if (m.begin) { clearTimeout(backupTimer); backup = []; setText("backupStatus", "Copying Bloop's memory…"); return; }
   if (m.ns !== undefined && backup) { backup.push({ ns: m.ns, k: m.k, ty: m.ty, v: m.v }); return; }
   if (m.end !== undefined && backup) {
     if (m.end !== backup.length) { setText("backupStatus", "Backup incomplete (" + backup.length + " of " + m.end + " items). Try again."); backup = null; return; }
@@ -972,6 +994,7 @@ async function connect() {
     writer = enc.writable.getWriter();
     setConnected(true, "Connected: listening");
     send("brain");
+    askVersion();
     readLoop();
   } catch (e) {
     port = null;
@@ -1019,7 +1042,14 @@ if (!("serial" in navigator)) {
   connectBtn.disabled = true;
 }
 connectBtn.addEventListener("click", connect);
-document.getElementById("backupBtn").addEventListener("click", () => { setText("backupStatus", "Asking Bloop…"); send("backup"); });
+document.getElementById("backupBtn").addEventListener("click", () => {
+  setText("backupStatus", "Asking Bloop…");
+  send("backup");
+  clearTimeout(backupTimer);
+  backupTimer = setTimeout(() => {
+    if (!backup) setText("backupStatus", boardBuild ? "Bloop didn't answer. Unplug it, plug it back in, connect, and try again." : OLD_FIRMWARE);
+  }, 5000);
+});
 document.getElementById("restoreFile").addEventListener("change", e => { const f = e.target.files[0]; e.target.value = ""; if (f) restoreFrom(f); });
 document.querySelectorAll(".cmd").forEach(b => b.addEventListener("click", () => send(b.dataset.cmd)));
 document.getElementById("clearBtn").addEventListener("click", () => { history = []; saveHistory(); redrawAll(); });

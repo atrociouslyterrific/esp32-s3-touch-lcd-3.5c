@@ -20,6 +20,13 @@
 #include "brain.h"
 #include "dream.h"
 #include "backup.h"
+// GitHub writes build_info.h with this build's version before compiling.
+#if __has_include("build_info.h")
+#include "build_info.h"
+#endif
+#ifndef FIRMWARE_BUILD
+#define FIRMWARE_BUILD "local"
+#endif
 #include "FreeSans9pt7b.h"
 #include "FreeSansBold9pt7b.h"
 #include "FreeSansBold12pt7b.h"
@@ -1903,6 +1910,7 @@ void readCommands() {
       else if (!strcmp(cmdBuf, "no")) toolbarTap(3);
       else if (!strcmp(cmdBuf, "brain")) sendBrain();
       else if (!strcmp(cmdBuf, "backup")) { saveAll(); backupDump(); }
+      else if (!strcmp(cmdBuf, "version")) sendVersion();
       else restoreCommand(cmdBuf);
       cmdLen = 0;
     } else if (cmdLen < (int)sizeof(cmdBuf) - 1) {
@@ -1914,8 +1922,15 @@ void readCommands() {
 // ============================================================ setup & loop
 
 // Startup report, for the website's "Board log" and the Serial Monitor.
+// Tells the website which version of Bloop is on the board.
+void sendVersion() {
+  if (!Serial) return;
+  Serial.printf("{\"t\":\"hi\",\"app\":\"bloop\",\"build\":\"%s\"}\n", FIRMWARE_BUILD);
+}
+
 void sendBootReport() {
-  Serial.printf("[boot] Bloop's Room | reset: %s%s | PSRAM %s (%u KB free) | heap %u KB free\n",
+  sendVersion();
+  Serial.printf("[boot] Bloop's Room build " FIRMWARE_BUILD " | reset: %s%s | PSRAM %s (%u KB free) | heap %u KB free\n",
                 resetReasonName(boardSt.reason), boardSt.coldRestart ? " (after cold-start restart)" : "",
                 boardSt.psram ? "found" : "NOT FOUND", (unsigned)(ESP.getFreePsram() / 1024),
                 (unsigned)(ESP.getFreeHeap() / 1024));
