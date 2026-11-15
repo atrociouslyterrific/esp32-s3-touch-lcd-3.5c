@@ -959,7 +959,7 @@ let imuData = [], imuLast = null, imuDrawPending = false;
 
 function onImu(m) {
   const t = performance.now();
-  imuLast = Object.assign({ t, wall: Date.now() }, m);
+  imuLast = Object.assign({}, m, { t, wall: Date.now() });   // our timestamp last: the message's own "t" is just its type ("imu")
   imuData.push(imuLast);
   while (imuData.length && imuData[0].t < t - IMU_KEEP_MS) imuData.shift();
   document.getElementById("imuCsvBtn").disabled = false;
