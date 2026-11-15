@@ -123,6 +123,9 @@ uint8_t *previewBuf = nullptr;
 volatile uint32_t previewLen = 0;
 volatile bool previewWanted = true;
 uint32_t previewFrames = 0, previewFpsAt = 0;
+volatile uint32_t cameraFrames = 0;   // new pictures from the camera (for its own fps)
+uint32_t cameraFramesAt = 0;
+float cameraFps = 0;
 float previewFps = 0;
 
 // ---- Real date and time ----
@@ -247,9 +250,61 @@ bool startCamera() {
   c.fb_count = 3;               // a spare buffer keeps the camera running while we copy
   if (esp_camera_init(&c) != ESP_OK) return false;
   sensor_t *s = esp_camera_sensor_get();
-  if (s) s->set_framesize(s, SIZES[videoOn() ? sizeIdx : 0].fs);
+  if (s) {
+    s->set_framesize(s, SIZES[videoOn() ? sizeIdx : 0].fs);
+    // Free picture improvements: even brightness to the corners (lens correction),
+    // hide stuck pixels, automatic exposure, gain and white balance.
+    if (s->set_lenc) s->set_lenc(s, 1);
+    if (s->set_bpc) s->set_bpc(s, 1);
+    if (s->set_wpc) s->set_wpc(s, 1);
+    if (s->set_exposure_ctrl) s->set_exposure_ctrl(s, 1);
+    if (s->set_gain_ctrl) s->set_gain_ctrl(s, 1);
+    if (s->set_whitebal) s->set_whitebal(s, 1);
+    if (s->set_awb_gain) s->set_awb_gain(s, 1);
+  }
   applyOrientation();
+  resetQuality();
   return true;
+}
+
+// ---- Picture quality ----
+// JPEG quality: smaller number = sharper picture, bigger file. Each size starts at
+// the best quality a card can usually keep up with at 20 fps. While recording, if
+// pictures pile up waiting for the card, quality steps down a little so it keeps
+// 20 fps instead of losing frames; when the card catches up, it steps back up.
+const int BEST_QUALITY[NUM_SIZES] = {10, 12, 14};
+const int WORST_QUALITY = 30;
+int quality = 12;
+uint32_t qualityCheckMs = 0, calmSinceMs = 0, droppedAtCheck = 0;
+
+void setQuality(int q) {
+  quality = q;
+  sensor_t *s = esp_camera_sensor_get();
+  if (s) s->set_quality(s, q);
+}
+
+void resetQuality() {
+  setQuality(BEST_QUALITY[videoOn() ? sizeIdx : 0]);
+  calmSinceMs = millis();
+}
+
+void autoQuality() {
+  if (!recording || !videoOn() || millis() - qualityCheckMs < 500) return;
+  qualityCheckMs = millis();
+  int waiting = uxQueueMessagesWaiting(fullSlots);
+  bool lost = framesDropped != droppedAtCheck;
+  droppedAtCheck = framesDropped;
+  if (waiting > SLOTS / 3 || lost) {          // the card is falling behind
+    if (quality < WORST_QUALITY) setQuality(min(quality + 2, WORST_QUALITY));
+    calmSinceMs = millis();
+  } else if (waiting <= 1) {
+    if (millis() - calmSinceMs > 3000 && quality > BEST_QUALITY[sizeIdx]) {   // calm for 3 s: step back up
+      setQuality(quality - 1);
+      calmSinceMs = millis();
+    }
+  } else {
+    calmSinceMs = millis();
+  }
 }
 
 // Takes a picture every 50 ms.
@@ -261,6 +316,9 @@ void captureTask(void *) {
       camera_fb_t *fb = esp_camera_fb_get();
       if (fb) {
         uint32_t t = (uint32_t)esp_timer_get_time();
+        static int64_t lastStamp = 0;   // a new picture, or the same one again?
+        int64_t stamp = (int64_t)fb->timestamp.tv_sec * 1000000 + fb->timestamp.tv_usec;
+        if (stamp != lastStamp) { lastStamp = stamp; cameraFrames = cameraFrames + 1; }
         if (recording && !stopAsked && videoOn()) {
           int slot;
           if (fb->len + 10 <= SLOT_BYTES && xQueueReceive(freeSlots, &slot, 0) == pdTRUE) {
@@ -446,6 +504,8 @@ void startRecording() {
   recStartUs = (uint32_t)esp_timer_get_time();
   recStartUnixMs = clockKnown ? nowUnixMs() : 0;
   recStartMs = millis();
+  if (videoOn()) resetQuality();
+  droppedAtCheck = 0;
   recording = true;
   Serial.printf("Recording %s: video %s, motion %d Hz\n", baseName, videoOn() ? SIZES[sizeIdx].name : "off",
                 imuOn() ? RATES[rateIdx] : 0);
@@ -526,19 +586,63 @@ void small(Arduino_GFX *g, int x, int y, const char *s, uint16_t color) {
 }
 
 // ---- Camera preview ----
-// Each picture is decoded into frameBuf first, then sent to the screen in one go,
-// so you never see it being painted in strips.
-uint16_t *frameBuf = nullptr;   // up to 320 x 240 pixels, in PSRAM
-int frameW = 0, frameH = 0;
+// A decode task on the other core turns each camera picture into pixels in one of
+// two buffers, while the main loop sends the previous finished picture to the
+// screen in one go. So decoding and drawing happen at the same time, and you
+// never see a picture being painted in strips.
+enum : uint8_t { BUF_FREE, BUF_READY, BUF_SHOWING };
+uint16_t *frameBufs[2] = {nullptr, nullptr};   // up to 320 x 240 pixels each, in PSRAM
+volatile uint8_t bufState[2] = {BUF_FREE, BUF_FREE};
+int bufW[2], bufH[2], bufX[2], bufY[2];
+uint32_t bufSeq[2];
+uint32_t decodeSeq = 0;
+portMUX_TYPE bufLock = portMUX_INITIALIZER_UNLOCKED;
+JPEGDEC jpegDec;                 // used only by the decode task
+uint16_t *decodeTarget = nullptr;
+int decodeW = 0, decodeH = 0;
 
 int drawJpegBlock(JPEGDRAW *d) {
   for (int row = 0; row < d->iHeight; row++) {
     int y = d->y + row;
-    if (y >= frameH) break;
-    int w = min((int)d->iWidth, frameW - d->x);
-    if (w > 0) memcpy(frameBuf + (size_t)y * frameW + d->x, d->pPixels + (size_t)row * d->iWidth, w * 2);
+    if (y >= decodeH) break;
+    int w = min((int)d->iWidth, decodeW - d->x);
+    if (w > 0) memcpy(decodeTarget + (size_t)y * decodeW + d->x, d->pPixels + (size_t)row * d->iWidth, w * 2);
   }
   return 1;
+}
+
+void decodeTask(void *) {
+  while (true) {
+    if (!camOk || !videoOn() || previewWanted || !previewLen) { vTaskDelay(pdMS_TO_TICKS(2)); continue; }
+    // Find a buffer that isn't on its way to the screen.
+    int b = -1;
+    portENTER_CRITICAL(&bufLock);
+    for (int i = 0; i < 2 && b < 0; i++) if (bufState[i] == BUF_FREE) b = i;
+    if (b < 0) for (int i = 0; i < 2 && b < 0; i++) if (bufState[i] == BUF_READY) b = i;   // replace an older unshown one
+    if (b >= 0) bufState[b] = BUF_SHOWING;   // reserved while we write it
+    portEXIT_CRITICAL(&bufLock);
+    if (b < 0) { vTaskDelay(pdMS_TO_TICKS(2)); continue; }
+
+    const Size &s = SIZES[sizeIdx];
+    int div = s.scale == JPEG_SCALE_HALF ? 2 : 4;
+    decodeW = min(s.w / div, SCREEN_W);
+    decodeH = min(s.h / div, PREV_H);
+    decodeTarget = frameBufs[b];
+    bool ok = false;
+    if (jpegDec.openRAM(previewBuf, previewLen, drawJpegBlock)) {
+      jpegDec.setPixelType(RGB565_LITTLE_ENDIAN);
+      ok = jpegDec.decode(0, 0, s.scale);
+      jpegDec.close();
+    }
+    previewWanted = true;   // ask the camera task for the next picture
+    bufW[b] = decodeW; bufH[b] = decodeH;
+    bufX[b] = (SCREEN_W - decodeW) / 2;
+    bufY[b] = PREV_Y + (PREV_H - decodeH) / 2;
+    bufSeq[b] = ++decodeSeq;
+    portENTER_CRITICAL(&bufLock);
+    bufState[b] = ok ? BUF_READY : BUF_FREE;
+    portEXIT_CRITICAL(&bufLock);
+  }
 }
 
 void drawRecTag() {
@@ -550,23 +654,21 @@ void drawRecTag() {
   small(lcd, 30, PREV_Y + 15, "REC", INK);
 }
 
-// Draws the newest camera picture if there is one. Returns true if it drew.
+// Sends the newest finished picture to the screen, if there is one.
 bool updatePreview() {
-  if (!camOk || !videoOn() || previewWanted || !previewLen) return false;
-  const Size &s = SIZES[sizeIdx];
-  int div = s.scale == JPEG_SCALE_HALF ? 2 : 4;
-  frameW = min(s.w / div, SCREEN_W);
-  frameH = min(s.h / div, PREV_H);
-  previewX = (SCREEN_W - frameW) / 2;
-  previewY = PREV_Y + (PREV_H - frameH) / 2;
-  if (frameBuf && jpeg.openRAM(previewBuf, previewLen, drawJpegBlock)) {
-    jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
-    jpeg.decode(0, 0, s.scale);
-    jpeg.close();
-    lcd->draw16bitRGBBitmap(previewX, previewY, frameBuf, frameW, frameH);   // the whole picture at once
-  }
+  if (!camOk || !videoOn()) return false;
+  int b = -1;
+  portENTER_CRITICAL(&bufLock);
+  for (int i = 0; i < 2; i++)
+    if (bufState[i] == BUF_READY && (b < 0 || bufSeq[i] > bufSeq[b])) b = i;
+  if (b >= 0) bufState[b] = BUF_SHOWING;
+  portEXIT_CRITICAL(&bufLock);
+  if (b < 0) return false;
+  lcd->draw16bitRGBBitmap(bufX[b], bufY[b], frameBufs[b], bufW[b], bufH[b]);   // the whole picture at once
   if (recording) drawRecTag();
-  previewWanted = true;   // ask for the next picture
+  portENTER_CRITICAL(&bufLock);
+  bufState[b] = BUF_FREE;
+  portEXIT_CRITICAL(&bufLock);
   previewFrames++;
   return true;
 }
@@ -631,8 +733,8 @@ void drawLow() {
     snprintf(buf, sizeof(buf), "%d:%02d", (int)secs / 60, (int)secs % 60);
     textAt(low, &FreeSansBold9pt7b, 16, STAT_Y + 22, buf, INK);
     if (videoOn())
-      snprintf(buf, sizeof(buf), "%.1f fps  %.1f MB  lost %lu", secs > 0.5f ? framesSaved / secs : 0.0f,
-               bytesSaved / 1048576.0f, (unsigned long)framesDropped);
+      snprintf(buf, sizeof(buf), "%.1f fps  %.1f MB  Q%d  lost %lu", secs > 0.5f ? framesSaved / secs : 0.0f,
+               bytesSaved / 1048576.0f, quality, (unsigned long)framesDropped);
     else
       snprintf(buf, sizeof(buf), "video off");
     small(low, 76, STAT_Y + 7, buf, framesDropped ? rgb(255, 170, 120) : rgb(140, 230, 160));
@@ -647,12 +749,15 @@ void drawLow() {
   } else if (!sdOk) {
     small(low, 16, STAT_Y + 7, sdProblem[0] ? sdProblem : "Put a microSD card in.", rgb(255, 170, 120));
     small(low, 16, STAT_Y + 21, "It's checked again every few seconds.", MUTED);
-  } else if (lastSaved[0]) {
-    small(low, 16, STAT_Y + 7, "Last recording:", MUTED);
-    small(low, 16, STAT_Y + 21, lastSaved, MUTED);
   } else {
-    snprintf(buf, sizeof(buf), "Ready. Preview %.0f fps.", previewFps);
-    small(low, 16, STAT_Y + 14, buf, MUTED);
+    if (lastSaved[0]) snprintf(buf, sizeof(buf), "Last: %s", lastSaved);
+    else snprintf(buf, sizeof(buf), "Ready. Tap REC to record.");
+    small(low, 16, STAT_Y + 7, buf, MUTED);
+    if (videoOn() && camOk)
+      snprintf(buf, sizeof(buf), "camera %.0f fps  |  screen %.0f fps  |  quality Q%d", cameraFps, previewFps, quality);
+    else
+      snprintf(buf, sizeof(buf), "camera off");
+    small(low, 16, STAT_Y + 21, buf, MUTED);
   }
 
   // Options: tap to change
@@ -691,6 +796,7 @@ void nextVideoSize() {
   }
   sizeIdx = next;
   prefs.putInt("size", sizeIdx);
+  if (videoOn()) resetQuality();
   previewWanted = true;
   previewNeedsClear = true;
 }
@@ -777,7 +883,8 @@ void setup() {
 
   slotMem = (uint8_t *)ps_malloc((size_t)SLOTS * SLOT_BYTES);
   previewBuf = (uint8_t *)ps_malloc(SLOT_BYTES);
-  frameBuf = (uint16_t *)ps_malloc(SCREEN_W * PREV_H * 2);
+  frameBufs[0] = (uint16_t *)ps_malloc(SCREEN_W * PREV_H * 2);
+  frameBufs[1] = (uint16_t *)ps_malloc(SCREEN_W * PREV_H * 2);
   ring = (Sample *)ps_malloc(RING * sizeof(Sample));
   freeSlots = xQueueCreate(SLOTS, sizeof(int));
   fullSlots = xQueueCreate(SLOTS, sizeof(int));
@@ -795,6 +902,10 @@ void setup() {
   if (imuOk) xTaskCreatePinnedToCore(imuTask, "imu", 4096, nullptr, configMAX_PRIORITIES - 1, nullptr, 0);
   xTaskCreatePinnedToCore(captureTask, "capture", 4096, nullptr, configMAX_PRIORITIES - 2, nullptr, 0);
   xTaskCreatePinnedToCore(writerTask, "writer", 8192, nullptr, configMAX_PRIORITIES - 3, nullptr, 1);
+  // Preview decoding: on the camera's core, below the camera and motion tasks so it
+  // never delays a recording; it uses whatever time is left over.
+  if (camOk && frameBufs[0] && frameBufs[1])
+    xTaskCreatePinnedToCore(decodeTask, "decode", 8192, nullptr, 2, nullptr, 0);
 }
 
 uint32_t lastUi = 0, lastGraph = 0, lastCardCheck = 0;
@@ -803,6 +914,7 @@ void loop() {
   handleTouch();
   readCommands();
   if (recording && (writeFailed || (millis() - recStartMs) / 1000 >= MAX_SECONDS)) stopRecording();
+  autoQuality();
   if (!sdOk && !recording && millis() - lastCardCheck > 4000) { lastCardCheck = millis(); mountCard(); }
   if (!screenOk) { delay(5); return; }
 
@@ -837,6 +949,9 @@ void loop() {
     lastUi = millis();
     if (millis() - previewFpsAt >= 1000) {
       previewFps = previewFrames * 1000.0f / (millis() - previewFpsAt);
+      uint32_t cf = cameraFrames;
+      cameraFps = (cf - cameraFramesAt) * 1000.0f / (millis() - previewFpsAt);
+      cameraFramesAt = cf;
       previewFrames = 0;
       previewFpsAt = millis();
     }
