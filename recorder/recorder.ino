@@ -62,7 +62,10 @@
 #define CAM_D5 40
 #define CAM_D6 39
 #define CAM_D7 21
-#define LCD_SPI_HZ 80000000
+// 40 MHz, not 80: at 80 MHz the camera preview showed faint grainy lines on this
+// board's screen (the picture itself was clean). A full 320x240 preview still takes
+// only about 30 ms to send at 40 MHz.
+#define LCD_SPI_HZ 40000000
 
 const int SCREEN_W = 320, SCREEN_H = 480;
 const int FPS = 20;
