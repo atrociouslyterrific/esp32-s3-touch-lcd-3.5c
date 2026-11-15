@@ -157,6 +157,7 @@ int calStep = 0;
 const char *calMsg = "";
 bool confirmReset = false;
 float saveTimer = 0;
+bool saveSoon = false;   // something worth keeping happened: save within a few seconds
 float physAcc = 0;
 float brainSendTimer = 0;
 char cmdBuf[600];   // long enough for a line of a restored backup
@@ -876,7 +877,7 @@ void updateWorld(float dt) {
   if (pet.asleep) {
     static uint32_t lastReported = 0;
     dream(brain, 40);
-    if (brain.dreams - lastReported >= 2000) { lastReported = brain.dreams; sendEvent("dream", brain.dreams); }
+    if (brain.dreams - lastReported >= 2000) { lastReported = brain.dreams; sendEvent("dream", brain.dreams); saveSoon = true; }
   }
 
   // Bed shape follows the floor: wide along it, short away from it.
@@ -968,8 +969,10 @@ void updateWorld(float dt) {
   sinceDecide += dt;
   if (sinceDecide > 2.2f || (decideNow && sinceDecide > 0.4f)) think();
 
+  // Save every 30 s (or sooner when saveSoon is set), so unplugging or installing
+  // an update loses very little.
   saveTimer += dt;
-  if (saveTimer > 90 && !restoring) { saveTimer = 0; saveAll(); }
+  if ((saveTimer > 30 || (saveSoon && saveTimer > 3)) && !restoring) { saveTimer = 0; saveSoon = false; saveAll(); }
 
   brainSendTimer += dt;
   if (brainSendTimer > 8) { brainSendTimer = 0; sendBrain(); }
@@ -1785,6 +1788,7 @@ void toolbarTap(int i) {
       decideNow = true;
       sinceDecide = 1;   // credit it to what Bloop is doing right now
       sendEvent("good", 2.5f);
+      saveSoon = true;
       say(SAY_GOOD, true);
       break;
     case 3:   // NO
@@ -1793,6 +1797,7 @@ void toolbarTap(int i) {
       decideNow = true;
       sinceDecide = 1;
       sendEvent("no", -2.5f);
+      saveSoon = true;
       say(SAY_NO, true);
       break;
     case 4:
@@ -1911,6 +1916,11 @@ void readCommands() {
       else if (!strcmp(cmdBuf, "brain")) sendBrain();
       else if (!strcmp(cmdBuf, "backup")) { saveAll(); backupDump(); }
       else if (!strcmp(cmdBuf, "version")) sendVersion();
+      else if (!strcmp(cmdBuf, "save")) {   // the website asks before installing an update
+        saveAll();
+        saveTimer = 0;
+        Serial.println("{\"t\":\"saved\"}");
+      }
       else restoreCommand(cmdBuf);
       cmdLen = 0;
     } else if (cmdLen < (int)sizeof(cmdBuf) - 1) {
