@@ -1345,7 +1345,11 @@ void drawWifiList() {
       lcd->fillRect(8 + b * 5, y + 14 - (b + 1) * 3, 3, (b + 1) * 3, b < bars ? rgb(120, 220, 150) : 0x3186);
     char name[26];
     snprintf(name, sizeof(name), "%s", w.ssid);
-    textAt(lcd, &FreeSans9pt7b, 34, y + 14, name, INK);
+    textAt(lcd, &FreeSans9pt7b, 34, y + 11, name, INK);
+    // Its MAC address (BSSID) underneath, in small letters
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X", w.bssid[0], w.bssid[1], w.bssid[2], w.bssid[3], w.bssid[4], w.bssid[5]);
+    small(lcd, 34, y + 13, mac, MUTED);
     snprintf(buf, sizeof(buf), "%2d  %4d", w.ch, w.rssi);
     small(lcd, 250, y + 6, buf, MUTED);
     if (w.open) small(lcd, 214, y + 6, "open", rgb(255, 200, 120));
