@@ -991,7 +991,11 @@ function setConnected(on, text) {
 }
 
 async function connect() {
-  if (port) { await disconnect(); return; }
+  if (port) {
+    await disconnect();
+    if (newBuildWaiting) reloadForBuild(newBuildWaiting);   // a newer build came out while connected
+    return;
+  }
   try {
     port = await navigator.serial.requestPort();
     await port.open({ baudRate: 115200 });
@@ -1094,6 +1098,60 @@ const BUILD = "__BUILD__";   // filled in by GitHub when it publishes the site
 fetch("manifest.json?v=" + BUILD, { cache: "no-store" }).then(r => r.json()).then(m => {
   if (m.version) setText("buildInfo", "Firmware build " + m.version);
 }).catch(() => {});
+
+// ---------- Keep this page up to date by itself ----------
+// Every 20 s: has GitHub published a newer build? Then reload, so the Install
+// buttons hand out the new firmware (no hard refresh needed). Every 90 s: is
+// GitHub building one right now? Then say so.
+const SITE_REPO = "atrociouslyterrific/esp32-s3-touch-lcd-3.5c";
+let newBuildWaiting = null;
+
+function reloadForBuild(v) {
+  let already = null;
+  try { already = sessionStorage.getItem("reloadedFor"); } catch (e) {}
+  if (already === v) {   // reloading didn't help: the browser is holding on to the old page
+    setText("buildInfo", "New firmware build " + v + " is ready. Press Cmd+Shift+R (Ctrl+Shift+R on Windows) once to load it.");
+    return;
+  }
+  try { sessionStorage.setItem("reloadedFor", v); } catch (e) {}
+  location.reload();
+}
+
+async function checkPublishedBuild() {
+  if (BUILD.startsWith("__")) return;
+  try {
+    const m = await fetch("manifest.json?check=" + Date.now(), { cache: "no-store" }).then(r => r.json());
+    if (!m.version || m.version === BUILD) return;
+    if (port) {   // don't cut off a connected board; reload after you disconnect
+      newBuildWaiting = m.version;
+      setText("buildInfo", "New firmware build " + m.version + " is ready. This page updates when you disconnect.");
+    } else {
+      reloadForBuild(m.version);
+    }
+  } catch (e) {}
+}
+
+async function checkGitHubBuild() {
+  if (BUILD.startsWith("__") || newBuildWaiting) return;
+  try {
+    const data = await fetch(`https://api.github.com/repos/${SITE_REPO}/actions/workflows/build.yml/runs?per_page=1`, { cache: "no-store" }).then(r => r.json());
+    const run = data.workflow_runs && data.workflow_runs[0];
+    if (!run) return;
+    if (run.status !== "completed") {
+      const mins = Math.max(0, Math.round((Date.now() - new Date(run.run_started_at)) / 60000));
+      setText("buildInfo", "Firmware build " + BUILD + ". GitHub is building a newer one (" + mins +
+        " min so far, usually about 7). This page will update itself when it's ready.");
+    } else if (run.conclusion === "failure" && !run.head_sha.startsWith(BUILD)) {
+      setText("buildInfo", "Firmware build " + BUILD + ". (GitHub's latest build failed, so this is still the newest working one.)");
+    } else {
+      setText("buildInfo", "Firmware build " + BUILD + " (the newest)");
+    }
+  } catch (e) {}
+}
+
+setInterval(checkPublishedBuild, 20000);
+setInterval(checkGitHubBuild, 90000);
+setTimeout(() => { checkPublishedBuild(); checkGitHubBuild(); }, 2000);
 
 
 // ---------- live training status (from the repo's "status" branch) ----------

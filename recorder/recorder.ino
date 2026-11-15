@@ -525,9 +525,19 @@ void small(Arduino_GFX *g, int x, int y, const char *s, uint16_t color) {
   g->setFont((const GFXfont *)NULL); g->setTextSize(1); g->setTextColor(color); g->setCursor(x, y); g->print(s);
 }
 
-// ---- Camera preview, straight to the screen ----
+// ---- Camera preview ----
+// Each picture is decoded into frameBuf first, then sent to the screen in one go,
+// so you never see it being painted in strips.
+uint16_t *frameBuf = nullptr;   // up to 320 x 240 pixels, in PSRAM
+int frameW = 0, frameH = 0;
+
 int drawJpegBlock(JPEGDRAW *d) {
-  lcd->draw16bitRGBBitmap(previewX + d->x, previewY + d->y, d->pPixels, d->iWidth, d->iHeight);
+  for (int row = 0; row < d->iHeight; row++) {
+    int y = d->y + row;
+    if (y >= frameH) break;
+    int w = min((int)d->iWidth, frameW - d->x);
+    if (w > 0) memcpy(frameBuf + (size_t)y * frameW + d->x, d->pPixels + (size_t)row * d->iWidth, w * 2);
+  }
   return 1;
 }
 
@@ -545,12 +555,15 @@ bool updatePreview() {
   if (!camOk || !videoOn() || previewWanted || !previewLen) return false;
   const Size &s = SIZES[sizeIdx];
   int div = s.scale == JPEG_SCALE_HALF ? 2 : 4;
-  previewX = (SCREEN_W - s.w / div) / 2;
-  previewY = PREV_Y + (PREV_H - s.h / div) / 2;
-  if (jpeg.openRAM(previewBuf, previewLen, drawJpegBlock)) {
+  frameW = min(s.w / div, SCREEN_W);
+  frameH = min(s.h / div, PREV_H);
+  previewX = (SCREEN_W - frameW) / 2;
+  previewY = PREV_Y + (PREV_H - frameH) / 2;
+  if (frameBuf && jpeg.openRAM(previewBuf, previewLen, drawJpegBlock)) {
     jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
     jpeg.decode(0, 0, s.scale);
     jpeg.close();
+    lcd->draw16bitRGBBitmap(previewX, previewY, frameBuf, frameW, frameH);   // the whole picture at once
   }
   if (recording) drawRecTag();
   previewWanted = true;   // ask for the next picture
@@ -764,6 +777,7 @@ void setup() {
 
   slotMem = (uint8_t *)ps_malloc((size_t)SLOTS * SLOT_BYTES);
   previewBuf = (uint8_t *)ps_malloc(SLOT_BYTES);
+  frameBuf = (uint16_t *)ps_malloc(SCREEN_W * PREV_H * 2);
   ring = (Sample *)ps_malloc(RING * sizeof(Sample));
   freeSlots = xQueueCreate(SLOTS, sizeof(int));
   fullSlots = xQueueCreate(SLOTS, sizeof(int));
