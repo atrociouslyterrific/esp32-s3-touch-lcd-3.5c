@@ -587,7 +587,7 @@ const uint16_t BG = 0x10A3, PANEL = 0x18E5, INK = 0xFFFF, MUTED = 0xAD55;
 const uint16_t AXIS_COL[3] = {0xF9A6, 0x5F2B, 0x4D9F};   // x red, y green, z blue
 int previewX = 0, previewY = 0;
 const int HIST = 150;
-float hist[3][HIST];
+float hist[6][HIST];   // accel x, y, z, then rotation x, y, z
 int histN = 0;
 
 void textAt(Arduino_GFX *g, const GFXfont *f, int x, int y, const char *s, uint16_t color) {
@@ -725,21 +725,22 @@ void drawLow() {
     portENTER_CRITICAL(&latestLock);
     s = latest;
     portEXIT_CRITICAL(&latestLock);
-    float now[3] = {s.ax, s.ay, s.az};
-    small(low, 14, GRAPH_Y + 5, "motion (g)", MUTED);
-    for (int i = 0; i < 3; i++) {
-      snprintf(buf, sizeof(buf), "%c %+.2f", "xyz"[i], now[i]);
-      small(low, 110 + i * 66, GRAPH_Y + 5, buf, AXIS_COL[i]);
-    }
-    int gx = 14, gw = 292, gy = GRAPH_Y + 16, gh = GRAPH_H - 20, mid = gy + gh / 2;
-    low->drawFastHLine(gx, mid, gw, 0x39C7);
-    for (int a = 0; a < 3 && histN > 1; a++) {
-      int px = 0, py = 0;
-      for (int i = 0; i < histN; i++) {
-        float v = constrain(hist[a][i], -2.0f, 2.0f);
-        int xx = gx + i * gw / (HIST - 1), yy = mid - (int)(v / 2.0f * (gh / 2 - 1));
-        if (i) low->drawLine(px, py, xx, yy, AXIS_COL[a]);
-        px = xx; py = yy;
+    // Two small graphs side by side: acceleration (left, +/-2 g) and rotation
+    // (right, +/-250 deg/s). x red, y green, z blue.
+    const char *titles[2] = {"accel (g)", "rotation (deg/s)"};
+    const float ranges[2] = {2.0f, 250.0f};
+    for (int g = 0; g < 2; g++) {
+      int gx = 14 + g * 150, gw = 142, gy = GRAPH_Y + 14, gh = GRAPH_H - 18, mid = gy + gh / 2;
+      small(low, gx, GRAPH_Y + 4, titles[g], MUTED);
+      low->drawFastHLine(gx, mid, gw, 0x39C7);
+      for (int a = 0; a < 3 && histN > 1; a++) {
+        int px = 0, py = 0;
+        for (int i = 0; i < histN; i++) {
+          float v = constrain(hist[g * 3 + a][i], -ranges[g], ranges[g]);
+          int xx = gx + i * gw / (HIST - 1), yy = mid - (int)(v / ranges[g] * (gh / 2 - 1));
+          if (i) low->drawLine(px, py, xx, yy, AXIS_COL[a]);
+          px = xx; py = yy;
+        }
       }
     }
   }
@@ -965,10 +966,11 @@ void loop() {
     s = latest;
     portEXIT_CRITICAL(&latestLock);
     if (histN == HIST) {
-      for (int a = 0; a < 3; a++) memmove(hist[a], hist[a] + 1, sizeof(float) * (HIST - 1));
+      for (int a = 0; a < 6; a++) memmove(hist[a], hist[a] + 1, sizeof(float) * (HIST - 1));
       histN--;
     }
     hist[0][histN] = s.ax; hist[1][histN] = s.ay; hist[2][histN] = s.az;
+    hist[3][histN] = s.gx; hist[4][histN] = s.gy; hist[5][histN] = s.gz;
     histN++;
   }
 
