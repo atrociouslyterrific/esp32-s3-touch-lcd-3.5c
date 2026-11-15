@@ -171,17 +171,13 @@ a { color: var(--series-1); }
           <button slot="activate" class="ghost">Install screen test</button>
           <span slot="unsupported"></span><span slot="not-allowed"></span>
         </esp-web-install-button>
-        <esp-web-install-button manifest="manifest-imu.json">
-          <button slot="activate" class="ghost">Install IMU recorder</button>
-          <span slot="unsupported"></span><span slot="not-allowed"></span>
-        </esp-web-install-button>
-        <esp-web-install-button manifest="manifest-cam.json">
-          <button slot="activate" class="ghost">Install camera recorder</button>
+        <esp-web-install-button manifest="manifest-rec.json">
+          <button slot="activate" class="ghost">Install recorder (camera + motion)</button>
           <span slot="unsupported"></span><span slot="not-allowed"></span>
         </esp-web-install-button>
         <span class="note" id="buildInfo" style="margin:0"></span>
       </div>
-      <p class="note" style="margin-top:8px">Screen stays dark? Press the board's <b>RESET</b> button once after installing. If it's still dark, connect below and read the <b>Board log</b>: it says what the board found when it started. The screen test is a simpler program for checking the screen and touch. The <b>IMU recorder</b> records the motion sensor to a microSD card as CSV files, and the <b>camera recorder</b> records 20 fps video from the camera to the card as .avi files (install Bloop again to go back; Bloop's memory is kept).</p>
+      <p class="note" style="margin-top:8px">Screen stays dark? Press the board's <b>RESET</b> button once after installing. If it's still dark, connect below and read the <b>Board log</b>: it says what the board found when it started. The screen test is a simpler program for checking the screen and touch. The <b>recorder</b> records 20 fps video from the camera and the motion sensor's data together onto a microSD card, on the same clock (either can be switched off). Install Bloop again to go back; Bloop's memory is kept.</p>
       <h2 style="margin-top:14px">2. Watch it learn</h2>
       <ol class="steps">
         <li>After installing, close the install window. Then click <b>Connect to Bloop</b> (top right) and pick the board's USB port.</li>
