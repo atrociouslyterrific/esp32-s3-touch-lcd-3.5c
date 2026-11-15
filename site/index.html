@@ -83,6 +83,10 @@ button, .btn {
 }
 button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--border); }
 button:disabled { opacity: 0.4; cursor: default; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { background: transparent; color: var(--ink); border-radius: 0; padding: 6px 11px; font-weight: 600; }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--btn); color: var(--btn-ink); }
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .status { font-size: 13px; color: var(--ink-2); display: flex; align-items: center; gap: 6px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
@@ -192,12 +196,19 @@ a { color: var(--series-1); }
 
     <section class="card span-12">
       <h2>Motion sensor (live)</h2>
-      <p class="note">Straight from the board while it's connected (Recorder or Bloop), last 10 seconds, with clock times. Hover a graph to read the exact time and values. Lying flat and still, one acceleration axis reads about 1 g (that's gravity) and rotation reads about 0.</p>
+      <p class="note">Straight from the board while it's connected (Recorder or Bloop), with clock times. Pick how much time the graphs show (10 seconds up to 15 minutes; the page keeps the last 15 minutes while it's open). Hover a graph to read the exact time and values. Lying flat and still, one acceleration axis reads about 1 g (that's gravity) and rotation reads about 0.</p>
       <div class="row" style="justify-content:space-between;margin-bottom:4px">
         <h2 style="margin:0">Acceleration (g)</h2>
         <div class="row">
           <span class="note" id="imuExtra" style="margin:0"></span>
-          <button class="ghost" id="imuCsvBtn" disabled>Download last minute (CSV)</button>
+          <div class="seg" id="imuWin" role="group" aria-label="Time shown">
+            <button data-ms="10000" aria-pressed="true">10 s</button>
+            <button data-ms="30000" aria-pressed="false">30 s</button>
+            <button data-ms="60000" aria-pressed="false">1 min</button>
+            <button data-ms="300000" aria-pressed="false">5 min</button>
+            <button data-ms="900000" aria-pressed="false">15 min</button>
+          </div>
+          <button class="ghost" id="imuCsvBtn" disabled>Download shown (CSV)</button>
         </div>
       </div>
       <div class="row" id="imuLegendA" style="gap:18px;margin-bottom:6px;font-size:14px"></div>
@@ -877,7 +888,46 @@ function drawSayLog() {
 // ---------- live motion sensor ----------
 // Two graphs (acceleration in g, rotation in °/s): different units and scales,
 // so they get their own axes rather than sharing one.
-const IMU_WINDOW_MS = 10000, IMU_KEEP_MS = 60000;
+const IMU_KEEP_MS = 900000;   // 15 minutes
+let IMU_WINDOW_MS = 10000;
+try { const w = +localStorage.getItem("imuWindow"); if (w >= 10000 && w <= IMU_KEEP_MS) IMU_WINDOW_MS = w; } catch (e) {}
+function windowText(ms) { return ms < 60000 ? ms / 1000 + " seconds" : ms === 60000 ? "minute" : ms / 60000 + " minutes"; }
+// Tidy clock-label spacing for each window (about 5 to 6 labels)
+function tickStepMs(win) { for (const s of [2000, 5000, 10000, 15000, 30000, 60000, 120000, 180000, 300000]) if (win / s <= 6) return s; return 300000; }
+document.querySelectorAll("#imuWin button").forEach(b => {
+  b.setAttribute("aria-pressed", +b.dataset.ms === IMU_WINDOW_MS ? "true" : "false");
+  b.addEventListener("click", () => {
+    IMU_WINDOW_MS = +b.dataset.ms;
+    try { localStorage.setItem("imuWindow", IMU_WINDOW_MS); } catch (e) {}
+    document.querySelectorAll("#imuWin button").forEach(x => x.setAttribute("aria-pressed", x === b ? "true" : "false"));
+    drawImu();
+  });
+});
+// Long windows have far more samples than pixels: keep the lowest and highest value
+// of each sliver of time, so short bumps still show.
+function thinOut(pts, keys, t0, win, buckets) {
+  if (pts.length <= buckets * 2) return pts;
+  const out = [];
+  let cur = -1, group = [];
+  const flush = () => {
+    if (!group.length) return;
+    const keep = new Set([group[0], group[group.length - 1]]);
+    for (const k of keys) {
+      let lo = group[0], hi = group[0];
+      for (const p of group) { if (p[k] < lo[k]) lo = p; if (p[k] > hi[k]) hi = p; }
+      keep.add(lo); keep.add(hi);
+    }
+    for (const p of group) if (keep.has(p)) out.push(p);
+    group = [];
+  };
+  for (const p of pts) {
+    const b = Math.floor((p.t - t0) / win * buckets);
+    if (b !== cur) { flush(); cur = b; }
+    group.push(p);
+  }
+  flush();
+  return out;
+}
 const COLS = ["--series-1", "--series-2", "--series-3"];
 const ACC = { keys: ["ax", "ay", "az"], unit: "g", minLim: 2, digits: 2, legend: "imuLegendA", box: "imuChartA", label: "Acceleration" };
 const GYR = { keys: ["gx", "gy", "gz"], unit: "°/s", minLim: 100, digits: 0, legend: "imuLegendG", box: "imuChartG", label: "Rotation" };
@@ -915,7 +965,8 @@ function drawImuGraph(spec, shown) {
     box.appendChild(d);
     return;
   }
-  const pts = shown.filter(p => p[spec.keys[0]] !== undefined);
+  const all = shown.filter(p => p[spec.keys[0]] !== undefined);
+  const pts = thinOut(all, spec.keys, shown[shown.length - 1].t - IMU_WINDOW_MS, IMU_WINDOW_MS, 460);
   const lastP = pts[pts.length - 1];
   // Legend: colour swatch + axis name, values in ink
   spec.keys.forEach((k, i) => {
@@ -939,15 +990,18 @@ function drawImuGraph(spec, shown) {
   lim = Math.ceil(lim / step * 2) / 2 * step;
   const X = t => m.l + (t - t0) / IMU_WINDOW_MS * (W - m.l - m.r);
   const Y = v => m.t + (1 - (v + lim) / (2 * lim)) * (H - m.t - m.b);
-  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": spec.label + " x, y and z over the last 10 seconds" }, box);
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": spec.label + " x, y and z over the last " + windowText(IMU_WINDOW_MS) }, box);
   for (const v of niceTicks(-lim, lim, 4)) {
     el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: v === 0 ? cssVar("--axis") : cssVar("--grid") }, svg);
     svgText(svg, m.l - 6, Y(v) + 4, (v > 0 ? "+" : "") + v, { "text-anchor": "end", "font-size": 11, fill: cssVar("--muted") });
   }
-  // Clock times along the bottom, every 2 seconds
-  for (let s = 0; s <= 10; s += 2)
-    svgText(svg, X(now - s * 1000), H - 6, clockText(nowWall - s * 1000, false),
-      { "text-anchor": s === 0 ? "end" : "middle", "font-size": 11, fill: cssVar("--muted") });
+  // Clock times along the bottom, spaced to suit the window
+  const stepMs = tickStepMs(IMU_WINDOW_MS);
+  for (let s = 0; s <= IMU_WINDOW_MS; s += stepMs) {
+    svgText(svg, X(now - s), H - 6, clockText(nowWall - s, false),
+      { "text-anchor": s === 0 ? "end" : s + stepMs > IMU_WINDOW_MS && X(now - s) < m.l + 30 ? "start" : "middle", "font-size": 11, fill: cssVar("--muted") });
+    if (s > 0) el("line", { x1: X(now - s), x2: X(now - s), y1: m.t, y2: H - m.b, stroke: cssVar("--grid") }, svg);
+  }
   spec.keys.forEach((k, i) => {
     const line = pts.map(p => X(p.t).toFixed(1) + "," + Y(p[k]).toFixed(1)).join(" ");
     el("polyline", { points: line, fill: "none", stroke: cssVar(COLS[i]), "stroke-width": 2, "stroke-linejoin": "round" }, svg);
@@ -973,11 +1027,13 @@ function drawImu() {
   setText("imuExtra", imuLast ? "Total " + Math.hypot(imuLast.ax, imuLast.ay, imuLast.az).toFixed(2) + " g  ·  " + clockText(imuLast.wall, false) : "");
 }
 
-// Save the last minute shown on this page, with timestamps.
+// Save the time shown in the graphs, with timestamps.
 function downloadImuCsv() {
   if (!imuData.length) return;
   const rows = ["local_time,unix_ms,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps"];
+  const from = imuData[imuData.length - 1].t - IMU_WINDOW_MS;
   for (const p of imuData) {
+    if (p.t < from) continue;
     const d = new Date(p.wall);
     const local = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0") +
       " " + clockText(p.wall, true);
