@@ -390,16 +390,51 @@ void captureTask(void *) {
 
 // ============================================================ motion sensor
 
+// Sets up the motion sensor: ±8 g, ±1024 °/s. Returns false if it didn't answer.
+bool setupImu(bool full) {
+  if (full) { if (!imu.begin(Wire, QMI8658_L_SLAVE_ADDRESS)) return false; }
+  else if (!imu.reset()) return false;
+  imu.configAccelerometer(SensorQMI8658::ACC_RANGE_8G, SensorQMI8658::ACC_ODR_500Hz, SensorQMI8658::LPF_MODE_3);
+  imu.configGyroscope(SensorQMI8658::GYR_RANGE_1024DPS, SensorQMI8658::GYR_ODR_448_4Hz, SensorQMI8658::LPF_MODE_3);
+  bool a = imu.enableAccelerometer();
+  bool g = imu.enableGyroscope();
+  return a && g;
+}
+
+volatile uint32_t imuReadErrors = 0, imuRestarts = 0;
+
 void imuTask(void *) {
   TickType_t last = xTaskGetTickCount();
+  int badStreak = 0, sameStreak = 0;
+  float prev[6] = {0, 0, 0, 0, 0, 0};
   while (true) {
     int hz = imuHz;
     TickType_t period = pdMS_TO_TICKS(1000 / hz);
     if (period < 1) period = 1;
-    Sample s;
+    Sample s = {};
     s.tUs = (uint32_t)esp_timer_get_time();
-    imu.getAccelerometer(s.ax, s.ay, s.az);
-    imu.getGyroscope(s.gx, s.gy, s.gz);
+    // Only keep readings the sensor really gave us. (Before, a failed read left
+    // leftover numbers in the sample, which showed up as a flat 4 g / 512 °/s.)
+    bool ok = imu.getAccelerometer(s.ax, s.ay, s.az);
+    ok = imu.getGyroscope(s.gx, s.gy, s.gz) && ok;
+    // A real sensor always jitters a little. Exactly the same six numbers for 2 s,
+    // or readings pinned at the end of the range, mean it has stopped measuring.
+    float now6[6] = {s.ax, s.ay, s.az, s.gx, s.gy, s.gz};
+    bool same = ok && memcmp(now6, prev, sizeof(prev)) == 0;
+    memcpy(prev, now6, sizeof(prev));
+    bool pinned = ok && (fabsf(s.ax) >= 7.99f || fabsf(s.ay) >= 7.99f || fabsf(s.az) >= 7.99f ||
+                        fabsf(s.gx) >= 1023.9f || fabsf(s.gy) >= 1023.9f || fabsf(s.gz) >= 1023.9f);
+    if (!ok) { imuReadErrors = imuReadErrors + 1; badStreak++; } else badStreak = 0;
+    sameStreak = same || pinned ? sameStreak + 1 : 0;
+    if (badStreak > hz / 2 + 2 || sameStreak > hz * 2 + 4) {   // restart the sensor
+      imuRestarts = imuRestarts + 1;
+      setupImu(false);
+      badStreak = sameStreak = 0;
+      vTaskDelay(pdMS_TO_TICKS(20));
+      last = xTaskGetTickCount();
+      continue;
+    }
+    if (!ok) { vTaskDelayUntil(&last, period); continue; }
     portENTER_CRITICAL(&latestLock);
     latest = s;
     portEXIT_CRITICAL(&latestLock);
@@ -716,8 +751,8 @@ void writeInfoFile(float secs) {
   else
     f.print("video: off\n");
   if (imuOn())
-    f.printf("motion: %d Hz, %lu rows, %lu lost; accel +/-8 g, gyro +/-1024 deg/s\n", RATES[rateIdx],
-             (unsigned long)samplesSaved, (unsigned long)samplesDropped);
+    f.printf("motion: %d Hz, %lu rows, %lu lost; accel +/-8 g, gyro +/-1024 deg/s; %lu failed reads skipped, sensor restarted %lu times since power-on\n", RATES[rateIdx],
+             (unsigned long)samplesSaved, (unsigned long)samplesDropped, (unsigned long)imuReadErrors, (unsigned long)imuRestarts);
   else
     f.print("motion: off\n");
   f.printf("firmware: %s\n", FIRMWARE_BUILD);
@@ -939,8 +974,8 @@ void drawLow() {
       snprintf(buf, sizeof(buf), "video off");
     small(low, 76, STAT_Y + 7, buf, framesDropped ? rgb(255, 170, 120) : rgb(140, 230, 160));
     if (imuOn())
-      snprintf(buf, sizeof(buf), "%lu motion rows  lost %lu", (unsigned long)(samplesSaved + (head_ - tail_)),
-               (unsigned long)samplesDropped);
+      snprintf(buf, sizeof(buf), "%lu motion rows  lost %lu  fixes %lu", (unsigned long)(samplesSaved + (head_ - tail_)),
+               (unsigned long)samplesDropped, (unsigned long)imuRestarts);
     else
       snprintf(buf, sizeof(buf), "motion off");
     small(low, 76, STAT_Y + 21, buf, samplesDropped ? rgb(255, 170, 120) : rgb(140, 230, 160));
@@ -1075,12 +1110,14 @@ void setup() {
   touchOk = touch.begin(Wire, FT6X36_SLAVE_ADDRESS);
   rtcOk = rtc.begin(Wire);
 
-  imuOk = imu.begin(Wire, QMI8658_L_SLAVE_ADDRESS);
-  if (imuOk) {
-    imu.configAccelerometer(SensorQMI8658::ACC_RANGE_8G, SensorQMI8658::ACC_ODR_500Hz, SensorQMI8658::LPF_MODE_3);
-    imu.configGyroscope(SensorQMI8658::GYR_RANGE_1024DPS, SensorQMI8658::GYR_ODR_448_4Hz, SensorQMI8658::LPF_MODE_3);
-    imu.enableAccelerometer();
-    imu.enableGyroscope();
+  imuOk = setupImu(true) || setupImu(true);   // one retry
+  if (imuOk) {   // check it really measures (gravity is about 1 g in total)
+    float ax = 0, ay = 0, az = 0;
+    delay(20);
+    bool readOk = imu.getAccelerometer(ax, ay, az);
+    float total = sqrtf(ax * ax + ay * ay + az * az);
+    if (!readOk || total < 0.3f || total > 3.0f) { delay(50); imuOk = setupImu(false); }
+    Serial.printf("[imu] first reading %.2f %.2f %.2f g (total %.2f)\n", ax, ay, az, total);
   }
 
   prefs.begin("recorder", false);
