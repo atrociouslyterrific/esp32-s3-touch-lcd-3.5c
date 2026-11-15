@@ -1372,7 +1372,10 @@ async function connect() {
     readLoop();
   } catch (e) {
     port = null;
-    setConnected(false, e && e.name === "NotFoundError" ? "Not connected" : "Couldn't connect: " + (e.message || e));
+    const busy = e && (e.name === "InvalidStateError" || e.name === "NetworkError" || /open/i.test(e.message || ""));
+    setConnected(false, e && e.name === "NotFoundError" ? "Not connected"
+      : busy ? "The board's USB port is busy. Close the install window (the X in its corner) or any other tab using the board, then click Connect again."
+      : "Couldn't connect: " + (e.message || e));
   }
 }
 

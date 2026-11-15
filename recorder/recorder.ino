@@ -455,6 +455,35 @@ bool setupImu(bool full) {
 
 volatile uint32_t imuReadErrors = 0, imuRestarts = 0;
 
+// Reads acceleration and rotation together: all 12 bytes (registers 0x35 to 0x40)
+// in one I2C transfer, so both come from the same moment. Readings seen on the
+// board sometimes came back scrambled (gravity on the wrong axis and the other
+// axes exactly 0); those are recognised and thrown away.
+bool readImu(Sample &s) {
+  const uint8_t ADDR = QMI8658_L_SLAVE_ADDRESS, FIRST = 0x35;
+  uint8_t b[12];
+  for (int attempt = 0; attempt < 2; attempt++) {
+    Wire.beginTransmission(ADDR);
+    Wire.write(FIRST);
+    if (Wire.endTransmission(false) != 0) continue;
+    if (Wire.requestFrom(ADDR, (uint8_t)12) != 12) continue;
+    int got = 0;
+    while (got < 12 && Wire.available()) b[got++] = Wire.read();
+    if (got != 12) continue;
+    int16_t r[6];
+    for (int i = 0; i < 6; i++) r[i] = (int16_t)(b[2 * i] | (b[2 * i + 1] << 8));
+    // A real sensor never reads exactly 0 on two acceleration axes at once
+    // (noise alone moves the last digit), nor on two rotation axes.
+    int accZeros = (r[0] == 0) + (r[1] == 0) + (r[2] == 0);
+    int gyrZeros = (r[3] == 0) + (r[4] == 0) + (r[5] == 0);
+    if (accZeros >= 2 || gyrZeros >= 2) continue;
+    s.ax = r[0] / 4096.0f; s.ay = r[1] / 4096.0f; s.az = r[2] / 4096.0f;   // ±8 g
+    s.gx = r[3] / 32.0f;   s.gy = r[4] / 32.0f;   s.gz = r[5] / 32.0f;     // ±1024 °/s
+    return true;
+  }
+  return false;
+}
+
 void imuTask(void *) {
   TickType_t last = xTaskGetTickCount();
   int badStreak = 0, sameStreak = 0;
@@ -467,8 +496,7 @@ void imuTask(void *) {
     s.tUs = (uint32_t)esp_timer_get_time();
     // Only keep readings the sensor really gave us. (Before, a failed read left
     // leftover numbers in the sample, which showed up as a flat 4 g / 512 °/s.)
-    bool ok = imu.getAccelerometer(s.ax, s.ay, s.az);
-    ok = imu.getGyroscope(s.gx, s.gy, s.gz) && ok;
+    bool ok = readImu(s);
     // A real sensor always jitters a little. Exactly the same six numbers for 3 s
     // mean it has stopped measuring.
     float now6[6] = {s.ax, s.ay, s.az, s.gx, s.gy, s.gz};
@@ -913,7 +941,7 @@ void decodeTask(void *) {
       decodeW = min(w / div, SCREEN_W);
       decodeH = min(h / div, PREV_H);
       if (decodeW > 0 && decodeH > 0) {
-        jpegDec.setPixelType(RGB565_LITTLE_ENDIAN);
+        jpegDec.setPixelType(RGB565_BIG_ENDIAN);   // the screen's own byte order: sent as-is, no per-pixel swap
         ok = jpegDec.decode(0, 0, scale);
       }
       jpegDec.close();
@@ -954,7 +982,7 @@ bool updatePreview() {
     lcd->fillRect(0, PREV_Y, SCREEN_W, PREV_H, 0x0000);
     lastW = bufW[b]; lastH = bufH[b];
   }
-  lcd->draw16bitRGBBitmap(bufX[b], bufY[b], frameBufs[b], bufW[b], bufH[b]);   // the whole picture at once
+  lcd->draw16bitBeRGBBitmap(bufX[b], bufY[b], frameBufs[b], bufW[b], bufH[b]);   // the whole picture at once, straight to the screen
   if (recording) drawRecTag();
   portENTER_CRITICAL(&bufLock);
   bufState[b] = BUF_FREE;
