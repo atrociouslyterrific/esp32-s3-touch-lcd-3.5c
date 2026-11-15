@@ -230,6 +230,37 @@ void applyOrientation() {
   s->set_hmirror(s, hmirror[orient]);
 }
 
+// Picture look. Some size changes reset parts of the sensor, so this runs after
+// every size change too.
+void applyPicture() {
+  sensor_t *s = esp_camera_sensor_get();
+  if (!s) return;
+  // Free picture improvements: even brightness to the corners (lens correction),
+  // hide stuck pixels, automatic exposure, gain and white balance.
+  if (s->set_lenc) s->set_lenc(s, 1);
+  if (s->set_bpc) s->set_bpc(s, 1);
+  if (s->set_wpc) s->set_wpc(s, 1);
+  if (s->set_exposure_ctrl) s->set_exposure_ctrl(s, 1);
+  if (s->set_gain_ctrl) s->set_gain_ctrl(s, 1);
+  if (s->set_whitebal) s->set_whitebal(s, 1);
+  if (s->set_awb_gain) s->set_awb_gain(s, 1);
+  // Brighter and more colourful: aim the auto exposure a step brighter, lift
+  // brightness and contrast a little and colour two steps (the default looks washed out).
+  if (s->set_ae_level) s->set_ae_level(s, 1);
+  if (s->set_brightness) s->set_brightness(s, 1);
+  if (s->set_contrast) s->set_contrast(s, 1);
+  if (s->set_saturation) s->set_saturation(s, 2);
+  // Enough gain for indoor light without too much grain, plus noise reduction.
+  if (s->set_gainceiling) s->set_gainceiling(s, GAINCEILING_16X);
+  if (s->set_denoise) s->set_denoise(s, 3);
+  // Less banding under indoor lights: switch on the OV5640's light-flicker filter
+  // (register 0x3A00 bit 5), which times the exposure to the mains flicker.
+  if (s->set_reg) s->set_reg(s, 0x3A00, 0x20, 0x20);
+}
+
+// After a size change the camera sends a few half-made pictures; skip them.
+volatile uint32_t settleUntilMs = 0;
+
 bool startCamera() {
   camera_config_t c = {};
   c.ledc_channel = LEDC_CHANNEL_0;
@@ -253,23 +284,9 @@ bool startCamera() {
   sensor_t *s = esp_camera_sensor_get();
   if (s) {
     s->set_framesize(s, SIZES[videoOn() ? sizeIdx : 0].fs);
-    // Free picture improvements: even brightness to the corners (lens correction),
-    // hide stuck pixels, automatic exposure, gain and white balance.
-    if (s->set_lenc) s->set_lenc(s, 1);
-    if (s->set_bpc) s->set_bpc(s, 1);
-    if (s->set_wpc) s->set_wpc(s, 1);
-    if (s->set_exposure_ctrl) s->set_exposure_ctrl(s, 1);
-    if (s->set_gain_ctrl) s->set_gain_ctrl(s, 1);
-    if (s->set_whitebal) s->set_whitebal(s, 1);
-    if (s->set_awb_gain) s->set_awb_gain(s, 1);
-    // Less grain: cap how much the sensor amplifies in dim light (a little darker,
-    // much less noisy) and switch on its noise reduction.
-    if (s->set_gainceiling) s->set_gainceiling(s, GAINCEILING_8X);
-    if (s->set_denoise) s->set_denoise(s, 2);
-    // Less banding under indoor lights: switch on the OV5640's light-flicker filter
-    // (register 0x3A00 bit 5), which times the exposure to the mains flicker.
-    if (s->set_reg) s->set_reg(s, 0x3A00, 0x20, 0x20);
+    applyPicture();
   }
+  settleUntilMs = millis() + 500;
   applyOrientation();
   resetQuality();
   return true;
@@ -359,7 +376,7 @@ void captureTask(void *) {
             framesDropped = framesDropped + 1;
           }
         }
-        if (previewWanted && fb->len <= SLOT_BYTES) {
+        if (previewWanted && fb->len <= SLOT_BYTES && (int32_t)(millis() - settleUntilMs) >= 0) {
           memcpy(previewBuf, fb->buf, fb->len);
           previewLen = fb->len;
           previewWanted = false;
@@ -790,15 +807,21 @@ void decodeTask(void *) {
     portEXIT_CRITICAL(&bufLock);
     if (b < 0) { vTaskDelay(pdMS_TO_TICKS(2)); continue; }
 
-    const Size &s = SIZES[sizeIdx];
-    int div = s.scale == JPEG_SCALE_HALF ? 2 : 4;
-    decodeW = min(s.w / div, SCREEN_W);
-    decodeH = min(s.h / div, PREV_H);
+    // Size the picture from the JPEG itself, not the chosen setting: right after a
+    // size change the camera can still hand over a picture of the old size.
     decodeTarget = frameBufs[b];
     bool ok = false;
     if (jpegDec.openRAM(previewBuf, previewLen, drawJpegBlock)) {
-      jpegDec.setPixelType(RGB565_LITTLE_ENDIAN);
-      ok = jpegDec.decode(0, 0, s.scale);
+      int w = jpegDec.getWidth(), h = jpegDec.getHeight();
+      int div = 2, scale = JPEG_SCALE_HALF;
+      if (w / 2 > SCREEN_W || h / 2 > PREV_H) { div = 4; scale = JPEG_SCALE_QUARTER; }
+      if (w / 4 > SCREEN_W || h / 4 > PREV_H) { div = 8; scale = JPEG_SCALE_EIGHTH; }
+      decodeW = min(w / div, SCREEN_W);
+      decodeH = min(h / div, PREV_H);
+      if (decodeW > 0 && decodeH > 0) {
+        jpegDec.setPixelType(RGB565_LITTLE_ENDIAN);
+        ok = jpegDec.decode(0, 0, scale);
+      }
       jpegDec.close();
     }
     previewWanted = true;   // ask the camera task for the next picture
@@ -831,6 +854,12 @@ bool updatePreview() {
   if (b >= 0) bufState[b] = BUF_SHOWING;
   portEXIT_CRITICAL(&bufLock);
   if (b < 0) return false;
+  // A different-sized picture from last time: clear first so no old edges stay behind.
+  static int lastW = 0, lastH = 0;
+  if (bufW[b] != lastW || bufH[b] != lastH) {
+    lcd->fillRect(0, PREV_Y, SCREEN_W, PREV_H, 0x0000);
+    lastW = bufW[b]; lastH = bufH[b];
+  }
   lcd->draw16bitRGBBitmap(bufX[b], bufY[b], frameBufs[b], bufW[b], bufH[b]);   // the whole picture at once
   if (recording) drawRecTag();
   portENTER_CRITICAL(&bufLock);
@@ -965,12 +994,14 @@ void nextVideoSize() {
   int next = (sizeIdx + 1) % (NUM_SIZES + 1);   // ... 1280x720, OFF, 640x480 ...
   if (next < NUM_SIZES && camOk) {
     sensor_t *s = esp_camera_sensor_get();
+    settleUntilMs = millis() + 500;   // skip the half-made pictures that follow
     if (!s || s->set_framesize(s, SIZES[next].fs) != 0) return;
+    applyPicture();
   }
   sizeIdx = next;
   prefs.putInt("size", sizeIdx);
   if (videoOn()) resetQuality();
-  previewWanted = true;
+  // (Don't touch previewWanted here: the decode task may be reading the picture.)
   previewNeedsClear = true;
 }
 
