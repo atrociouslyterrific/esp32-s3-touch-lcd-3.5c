@@ -46,22 +46,10 @@
 #define FIRMWARE_BUILD "local"
 #endif
 
-// ---- Pins (camera pins from Waveshare's board support code) ----
+// ---- Pins (the camera pins are in board.h) ----
 #define SD_CLK 11
 #define SD_CMD 10
 #define SD_D0 9
-#define CAM_XCLK 38
-#define CAM_PCLK 41
-#define CAM_VSYNC 17
-#define CAM_HREF 18
-#define CAM_D0 45
-#define CAM_D1 47
-#define CAM_D2 48
-#define CAM_D3 46
-#define CAM_D4 42
-#define CAM_D5 40
-#define CAM_D6 39
-#define CAM_D7 21
 // 40 MHz, not 80: at 80 MHz the camera preview showed faint grainy lines on this
 // board's screen (the picture itself was clean). A full 320x240 preview still takes
 // only about 30 ms to send at 40 MHz.

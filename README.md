@@ -40,8 +40,10 @@ Bloop is a pet that lives in a room you can tip over, and it learns by itself.
 | Backlight | | GPIO 6 |
 | Touch | FT6336 | I2C: SDA 8, SCL 7 |
 | IO expander | TCA9554 (0x20) | I2C. Its pin 1 is the LCD reset |
+| Camera | OV5640 | XCLK 38, PCLK 41, VSYNC 17, HREF 18, data D0-D7: 45, 47, 48, 46, 42, 40, 39, 21. Control lines share the I2C bus (SDA 8, SCL 7). No reset or power-down pin |
+| microSD card | | SD_MMC, 1-bit: CLK 11, CMD 10, D0 9 |
 
-These pins come from [Waveshare's official examples](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-3.5).
+These pins come from [Waveshare's official examples](https://github.com/waveshareteam/ESP32-S3-Touch-LCD-3.5). The camera pins are set by the board's camera connector, so they can't be moved; they are defined once in each sketch's `board.h`.
 
 ## Arduino IDE setup
 

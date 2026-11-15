@@ -24,6 +24,23 @@
 #define EXP_LCD_RST 1
 #define EXP_PWR_EN 7
 
+// OV5640 camera (the -C board). Fixed by the board's camera connector; same
+// numbers as Waveshare's 03_camera_web_server example. The camera's control
+// lines (SCCB) share the I2C bus above (SDA 8, SCL 7); it has no reset or
+// power-down pin. None of these clash with the screen, backlight or I2C pins.
+#define CAM_XCLK 38
+#define CAM_PCLK 41
+#define CAM_VSYNC 17
+#define CAM_HREF 18
+#define CAM_D0 45
+#define CAM_D1 47
+#define CAM_D2 48
+#define CAM_D3 46
+#define CAM_D4 42
+#define CAM_D5 40
+#define CAM_D6 39
+#define CAM_D7 21
+
 struct BoardStatus {
   bool expander, pmu, psram;
   bool coldRestart;          // true if this boot came from the cold-start restart
