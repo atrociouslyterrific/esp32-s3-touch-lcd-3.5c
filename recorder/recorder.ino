@@ -31,6 +31,7 @@
 #include <SD_MMC.h>
 #include <Preferences.h>
 #include <JPEGDEC.h>
+#include <WiFi.h>
 #include "avi.h"
 #include "FreeSans9pt7b.h"
 #include "FreeSansBold9pt7b.h"
@@ -261,6 +262,13 @@ bool startCamera() {
     if (s->set_gain_ctrl) s->set_gain_ctrl(s, 1);
     if (s->set_whitebal) s->set_whitebal(s, 1);
     if (s->set_awb_gain) s->set_awb_gain(s, 1);
+    // Less grain: cap how much the sensor amplifies in dim light (a little darker,
+    // much less noisy) and switch on its noise reduction.
+    if (s->set_gainceiling) s->set_gainceiling(s, GAINCEILING_8X);
+    if (s->set_denoise) s->set_denoise(s, 2);
+    // Less banding under indoor lights: switch on the OV5640's light-flicker filter
+    // (register 0x3A00 bit 5), which times the exposure to the mains flicker.
+    if (s->set_reg) s->set_reg(s, 0x3A00, 0x20, 0x20);
   }
   applyOrientation();
   resetQuality();
@@ -272,7 +280,7 @@ bool startCamera() {
 // the best quality a card can usually keep up with at 20 fps. While recording, if
 // pictures pile up waiting for the card, quality steps down a little so it keeps
 // 20 fps instead of losing frames; when the card catches up, it steps back up.
-const int BEST_QUALITY[NUM_SIZES] = {10, 12, 14};
+const int BEST_QUALITY[NUM_SIZES] = {8, 10, 12};
 const int WORST_QUALITY = 30;
 int quality = 12;
 uint32_t qualityCheckMs = 0, calmSinceMs = 0, droppedAtCheck = 0;
@@ -307,6 +315,17 @@ void autoQuality() {
   }
 }
 
+// A complete JPEG starts with FF D8 and ends with FF D9 (sometimes followed by a few
+// padding bytes). A picture damaged on its way from the camera (that's what shows up
+// as lines or stripes) fails this check.
+volatile uint32_t damagedFrames = 0;
+bool jpegLooksWhole(const uint8_t *b, size_t len) {
+  if (len < 128 || b[0] != 0xFF || b[1] != 0xD8) return false;
+  for (size_t i = len - 1; i > len - 64 && i > 1; i--)
+    if (b[i] == 0xD9 && b[i - 1] == 0xFF) return true;
+  return false;
+}
+
 // Takes a picture every 50 ms.
 void captureTask(void *) {
   TickType_t last = xTaskGetTickCount();
@@ -314,6 +333,16 @@ void captureTask(void *) {
   while (true) {
     if (camOk) {
       camera_fb_t *fb = esp_camera_fb_get();
+      if (fb && !jpegLooksWhole(fb->buf, fb->len)) {   // damaged: drop it and take the next one
+        damagedFrames = damagedFrames + 1;
+        esp_camera_fb_return(fb);
+        fb = esp_camera_fb_get();
+        if (fb && !jpegLooksWhole(fb->buf, fb->len)) {
+          damagedFrames = damagedFrames + 1;
+          esp_camera_fb_return(fb);
+          fb = nullptr;
+        }
+      }
       if (fb) {
         uint32_t t = (uint32_t)esp_timer_get_time();
         static int64_t lastStamp = 0;   // a new picture, or the same one again?
@@ -366,6 +395,112 @@ void imuTask(void *) {
       }
     }
     vTaskDelayUntil(&last, period);
+  }
+}
+
+// ============================================================ Wi-Fi scanner
+// Lists the Wi-Fi networks nearby (it never joins one). Scans every 5 seconds while
+// switched on. While recording, each scan is also saved to _wifi.csv.
+
+struct Net { char ssid[33]; uint8_t bssid[6]; int8_t rssi; uint8_t ch; bool open; };
+const int MAX_NETS = 24;
+Net nets[MAX_NETS];
+int netCount = 0;
+bool wifiOn = false, wifiScanning = false, wifiListDirty = false;
+uint32_t wifiLastScanMs = 0, wifiScans = 0;
+int64_t wifiLastScanUnixMs = 0;
+// Rows waiting for the writer task (it owns the card)
+char wifiRows[6144];
+volatile int wifiRowsLen = 0;
+volatile bool wifiRowsReady = false;
+File wifiFile;
+
+// Network names can contain anything; keep them safe for CSV and the website.
+void cleanName(const char *in, char *out, size_t n) {
+  size_t j = 0;
+  for (size_t i = 0; in[i] && j < n - 1; i++) {
+    unsigned char c = in[i];
+    out[j++] = (c < 32 || c == '"' || c == '\\' || c == ',' || c > 126) ? ' ' : c;
+  }
+  out[j] = 0;
+}
+
+void wifiStartScan() {
+  WiFi.scanNetworks(true, true);   // in the background; include hidden networks
+  wifiScanning = true;
+}
+
+void wifiSet(bool on) {
+  wifiOn = on;
+  if (on) {
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    wifiStartScan();
+  } else {
+    WiFi.scanDelete();
+    WiFi.mode(WIFI_OFF);
+    wifiScanning = false;
+    netCount = 0;
+  }
+  prefs.putBool("wifi", on);
+  wifiListDirty = true;
+}
+
+void wifiPoll() {
+  if (!wifiOn) return;
+  if (!wifiScanning) {
+    if (millis() - wifiLastScanMs > 5000) wifiStartScan();
+    return;
+  }
+  int n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_RUNNING) return;
+  wifiScanning = false;
+  wifiLastScanMs = millis();
+  if (n < 0) return;   // failed; try again in 5 s
+  netCount = 0;
+  for (int i = 0; i < n && netCount < MAX_NETS; i++) {
+    Net &w = nets[netCount++];
+    cleanName(WiFi.SSID(i).c_str(), w.ssid, sizeof(w.ssid));
+    if (!w.ssid[0]) strcpy(w.ssid, "(hidden)");
+    memcpy(w.bssid, WiFi.BSSID(i), 6);
+    w.rssi = WiFi.RSSI(i);
+    w.ch = WiFi.channel(i);
+    w.open = WiFi.encryptionType(i) == WIFI_AUTH_OPEN;
+  }
+  WiFi.scanDelete();
+  // Strongest first
+  for (int i = 1; i < netCount; i++)
+    for (int j = i; j > 0 && nets[j].rssi > nets[j - 1].rssi; j--) { Net t = nets[j]; nets[j] = nets[j - 1]; nets[j - 1] = t; }
+  wifiScans++;
+  wifiLastScanUnixMs = clockKnown ? nowUnixMs() : 0;
+  wifiListDirty = true;
+
+  // To the website
+  if (Serial) {
+    Serial.print("{\"t\":\"wifi\",\"n\":[");
+    for (int i = 0; i < netCount; i++)
+      Serial.printf("%s[\"%s\",%d,%d,%d]", i ? "," : "", nets[i].ssid, nets[i].rssi, nets[i].ch, nets[i].open ? 1 : 0);
+    Serial.println("]}");
+  }
+  // To the card, while recording
+  if (recording && !stopAsked && !wifiRowsReady) {
+    uint32_t t = (uint32_t)esp_timer_get_time();
+    float secs = (uint32_t)(t - recStartUs) / 1e6f;
+    long long u = clockKnown ? recStartUnixMs + (uint32_t)(t - recStartUs) / 1000 : 0;
+    char when[32] = "";
+    if (clockKnown) formatLocal(u, when, sizeof(when), false);
+    int len = 0;
+    for (int i = 0; i < netCount && len < (int)sizeof(wifiRows) - 160; i++) {
+      const Net &w = nets[i];
+      char bssid[18];
+      snprintf(bssid, sizeof(bssid), "%02X:%02X:%02X:%02X:%02X:%02X", w.bssid[0], w.bssid[1], w.bssid[2], w.bssid[3], w.bssid[4], w.bssid[5]);
+      if (clockKnown)
+        len += snprintf(wifiRows + len, sizeof(wifiRows) - len, "%.3f,%lld,%s,%s,%s,%d,%d,%s\n", secs, u, when, w.ssid, bssid, w.ch, w.rssi, w.open ? "open" : "locked");
+      else
+        len += snprintf(wifiRows + len, sizeof(wifiRows) - len, "%.3f,,,%s,%s,%d,%d,%s\n", secs, w.ssid, bssid, w.ch, w.rssi, w.open ? "open" : "locked");
+    }
+    wifiRowsLen = len;
+    wifiRowsReady = len > 0;
   }
 }
 
@@ -440,10 +575,21 @@ void writerTask(void *) {
       xQueueSend(freeSlots, &slot, 0);
     }
     if (imuOn()) writeImuSamples();
+    if (wifiRowsReady) {   // a Wi-Fi scan finished while recording
+      if (!wifiFile) {
+        char path[72];
+        snprintf(path, sizeof(path), "%s_wifi.csv", baseName);
+        wifiFile = SD_MMC.open(path, FILE_WRITE);
+        if (wifiFile) wifiFile.print("time_s,unix_ms,local_time,ssid,bssid,channel,rssi_dbm,security\n");
+      }
+      if (wifiFile) wifiFile.write((const uint8_t *)wifiRows, wifiRowsLen);
+      wifiRowsReady = false;
+    }
     if (millis() - lastFlush > 2000) {
       if (avi.f) avi.f.flush();
       if (frameFile) frameFile.flush();
       if (imuFile) imuFile.flush();
+      if (wifiFile) wifiFile.flush();
       lastFlush = millis();
     }
     writerIdle = true;
@@ -544,8 +690,9 @@ void writeInfoFile(float secs) {
   }
   f.printf("length_s: %.2f\n", secs);
   if (videoOn())
-    f.printf("video: %s, %lu frames, %.2f fps achieved, %lu frames lost\n", SIZES[sizeIdx].name,
-             (unsigned long)framesSaved, secs > 0 ? framesSaved / secs : 0, (unsigned long)framesDropped);
+    f.printf("video: %s, %lu frames, %.2f fps achieved, %lu frames lost, %lu damaged frames skipped since power-on\n",
+             SIZES[sizeIdx].name, (unsigned long)framesSaved, secs > 0 ? framesSaved / secs : 0,
+             (unsigned long)framesDropped, (unsigned long)damagedFrames);
   else
     f.print("video: off\n");
   if (imuOn())
@@ -571,6 +718,8 @@ void stopRecording() {
     if (frameFile) frameFile.close();
   }
   if (imuFile) imuFile.close();
+  if (wifiFile) wifiFile.close();
+  wifiRowsReady = false;
   float secs = elapsedUs / 1e6f;
   writeInfoFile(secs);
   snprintf(lastSaved, sizeof(lastSaved), "%s  (%.0f s)", baseName + 5, secs);
@@ -773,7 +922,8 @@ void drawLow() {
     else snprintf(buf, sizeof(buf), "Ready. Tap REC to record.");
     small(low, 16, STAT_Y + 7, buf, MUTED);
     if (videoOn() && camOk)
-      snprintf(buf, sizeof(buf), "camera %.0f fps  |  screen %.0f fps  |  quality Q%d", cameraFps, previewFps, quality);
+      snprintf(buf, sizeof(buf), "camera %.0f fps  screen %.0f  Q%d  damaged %lu", cameraFps, previewFps, quality,
+               (unsigned long)damagedFrames);
     else
       snprintf(buf, sizeof(buf), "camera off");
     small(low, 16, STAT_Y + 21, buf, MUTED);
@@ -784,14 +934,18 @@ void drawLow() {
   char mot[12];
   if (imuOn()) snprintf(mot, sizeof(mot), "%d Hz", RATES[rateIdx]);
   else snprintf(mot, sizeof(mot), "OFF");
-  const char *labels[3] = {"Video", "Motion", "Flip"};
-  const char *values[3] = {vid, mot, "turn"};
-  const int xs[3] = {8, 118, 228}, ws[3] = {106, 106, 84};
-  for (int i = 0; i < 3; i++) {
-    bool locked = recording;
-    low->fillRoundRect(xs[i], OPT_Y, ws[i], 36, 8, locked ? BG : PANEL);
-    small(low, xs[i] + 8, OPT_Y + 5, labels[i], MUTED);
-    textAt(low, &FreeSansBold9pt7b, xs[i] + 8, OPT_Y + 30, values[i], locked ? 0x8410 : INK);
+  char wifiVal[12];
+  if (wifiOn) snprintf(wifiVal, sizeof(wifiVal), "%d", netCount);
+  else snprintf(wifiVal, sizeof(wifiVal), "OFF");
+  const char *labels[4] = {"Video", "Motion", "Flip", wifiOn ? "Wi-Fi nets" : "Wi-Fi"};
+  const char *values[4] = {vid, mot, "turn", wifiVal};
+  for (int i = 0; i < 4; i++) {
+    int x = 8 + i * 77, w = 72;
+    bool locked = recording && i < 3;   // Wi-Fi can be switched any time
+    bool lit = i == 3 && wifiOn;
+    low->fillRoundRect(x, OPT_Y, w, 36, 8, locked ? BG : (lit ? rgb(40, 90, 150) : PANEL));
+    small(low, x + 6, OPT_Y + 5, labels[i], MUTED);
+    textAt(low, &FreeSans9pt7b, x + 6, OPT_Y + 30, values[i], locked ? 0x8410 : INK);
   }
 
   // REC / STOP
@@ -841,10 +995,14 @@ void handleTouch() {
     if (y >= REC_Y && y <= REC_Y + 46) {
       if (recording) stopRecording();
       else startRecording();
-    } else if (y >= OPT_Y && y <= OPT_Y + 36 && !recording) {
-      if (x < 114) nextVideoSize();
-      else if (x < 224) nextMotionRate();
-      else nextOrientation();
+    } else if (y >= OPT_Y && y <= OPT_Y + 36) {
+      int i = (x - 8) / 77;
+      if (i == 3) { wifiSet(!wifiOn); if (!wifiOn) previewNeedsClear = true; }   // any time, even while recording
+      else if (!recording) {
+        if (i <= 0) nextVideoSize();
+        else if (i == 1) nextMotionRate();
+        else nextOrientation();
+      }
     }
   }
   wasDown = down;
@@ -925,6 +1083,41 @@ void setup() {
   // never delays a recording; it uses whatever time is left over.
   if (camOk && frameBufs[0] && frameBufs[1])
     xTaskCreatePinnedToCore(decodeTask, "decode", 8192, nullptr, 2, nullptr, 0);
+  if (prefs.getBool("wifi", false)) wifiSet(true);   // it was scanning last time
+}
+
+// The Wi-Fi list, in place of the camera picture while scanning is on.
+void drawWifiList() {
+  lcd->fillRect(0, PREV_Y, SCREEN_W, PREV_H, 0x0000);
+  char buf[64];
+  if (wifiScans == 0) {
+    textAt(lcd, &FreeSans9pt7b, 70, PREV_Y + 125, "Scanning for Wi-Fi...", MUTED);
+    return;
+  }
+  char when[32] = "";
+  if (wifiLastScanUnixMs) formatLocal(wifiLastScanUnixMs, when, sizeof(when), false);
+  snprintf(buf, sizeof(buf), "%d networks   %s", netCount, when[0] ? when + 11 : "");
+  small(lcd, 8, PREV_Y + 6, buf, MUTED);
+  small(lcd, 250, PREV_Y + 6, "ch   dBm", MUTED);
+  int rows = min(netCount, 10);
+  for (int i = 0; i < rows; i++) {
+    const Net &w = nets[i];
+    int y = PREV_Y + 20 + i * 22;
+    // Signal bars: 4 = strong (-55 dBm or better) ... 1 = weak
+    int bars = w.rssi >= -55 ? 4 : w.rssi >= -67 ? 3 : w.rssi >= -78 ? 2 : 1;
+    for (int b = 0; b < 4; b++)
+      lcd->fillRect(8 + b * 5, y + 14 - (b + 1) * 3, 3, (b + 1) * 3, b < bars ? rgb(120, 220, 150) : 0x3186);
+    char name[26];
+    snprintf(name, sizeof(name), "%s", w.ssid);
+    textAt(lcd, &FreeSans9pt7b, 34, y + 14, name, INK);
+    snprintf(buf, sizeof(buf), "%2d  %4d", w.ch, w.rssi);
+    small(lcd, 250, y + 6, buf, MUTED);
+    if (w.open) small(lcd, 214, y + 6, "open", rgb(255, 200, 120));
+  }
+  if (netCount > rows) {
+    snprintf(buf, sizeof(buf), "+ %d more (see the website)", netCount - rows);
+    small(lcd, 8, PREV_Y + PREV_H - 10, buf, MUTED);
+  }
 }
 
 uint32_t lastUi = 0, lastGraph = 0, lastCardCheck = 0;
@@ -947,16 +1140,22 @@ void loop() {
                   s.ax, s.ay, s.az, s.gx, s.gy, s.gz);
   }
   if (!sdOk && !recording && millis() - lastCardCheck > 4000) { lastCardCheck = millis(); mountCard(); }
+  wifiPoll();
   if (!screenOk) { delay(5); return; }
 
-  // Camera preview: as fast as pictures arrive (up to 20 a second)
-  if (previewNeedsClear) {
-    previewNeedsClear = false;
-    if (!camOk) clearPreview("Camera not found", rgb(255, 120, 110));
-    else if (!videoOn()) clearPreview("Video is OFF", MUTED);
-    else clearPreview(nullptr, 0);
+  if (wifiOn) {
+    // Wi-Fi list in place of the camera picture (recording carries on underneath)
+    if (wifiListDirty) { wifiListDirty = false; drawWifiList(); }
+  } else {
+    // Camera preview: as fast as pictures arrive (up to 20 a second)
+    if (previewNeedsClear) {
+      previewNeedsClear = false;
+      if (!camOk) clearPreview("Camera not found", rgb(255, 120, 110));
+      else if (!videoOn()) clearPreview("Video is OFF", MUTED);
+      else clearPreview(nullptr, 0);
+    }
+    updatePreview();
   }
-  updatePreview();
 
   // Motion graph history: 10 points a second
   if (millis() - lastGraph >= 100) {
