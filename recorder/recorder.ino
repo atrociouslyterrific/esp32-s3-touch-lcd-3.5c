@@ -32,6 +32,9 @@
 #include <Preferences.h>
 #include <JPEGDEC.h>
 #include <WiFi.h>
+#include <freertos/message_buffer.h>
+#include <mbedtls/base64.h>
+#include <stdarg.h>
 #include "avi.h"
 #include "FreeSans9pt7b.h"
 #include "FreeSansBold9pt7b.h"
@@ -152,8 +155,44 @@ const char *sdProblem = "";
 char message[80] = "";
 uint32_t messageUntil = 0;
 
+// ---- Output to the website ----
+// Everything sent over USB goes through one task (serialTask), one whole line at a
+// time, so the camera picture (sent in parts) and the data lines never get mixed
+// up, and nothing else ever waits for the USB cable.
+MessageBufferHandle_t serialMB = nullptr;
+const size_t OUT_MAX = 4096;          // longest single line (the Wi-Fi list)
+
+// Writes all of it, as fast as the USB link takes it (gives up after 300 ms).
+void outWrite(const char *s, size_t n) {
+  uint32_t t0 = millis();
+  while (n) {
+    int room = Serial.availableForWrite();
+    if (room <= 0) {
+      if (!Serial || millis() - t0 > 300) return;
+      vTaskDelay(1);
+      continue;
+    }
+    size_t w = Serial.write((const uint8_t *)s, min((size_t)room, n));
+    if (!w) { vTaskDelay(1); continue; }
+    s += w; n -= w;
+  }
+}
+void out(const char *s, size_t n) {
+  if (!n || n > OUT_MAX) return;
+  if (serialMB) xMessageBufferSend(serialMB, s, n, 0);   // dropped if the link is that far behind
+  else outWrite(s, n);                                  // before the output task starts
+}
+void outf(const char *fmt, ...) {
+  char b[768];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(b, sizeof(b), fmt, ap);
+  va_end(ap);
+  if (n > 0) out(b, min(n, (int)sizeof(b) - 1));
+}
+
 static inline uint16_t rgb(int r, int g, int b) { return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3); }
-void say(const char *m) { snprintf(message, sizeof(message), "%s", m); messageUntil = millis() + 5000; Serial.println(m); }
+void say(const char *m) { snprintf(message, sizeof(message), "%s", m); messageUntil = millis() + 5000; outf("%s\n", m); }
 
 // ============================================================ date and time
 
@@ -215,7 +254,7 @@ void setClock(int64_t unixMs, int tz) {
   }
   char buf[32];
   formatLocal(unixMs, buf, sizeof(buf), false);
-  Serial.printf("{\"t\":\"clock\",\"set\":\"%s\"}\n", buf);
+  outf("{\"t\":\"clock\",\"set\":\"%s\"}\n", buf);
 }
 
 // ============================================================ camera
@@ -244,12 +283,13 @@ void applyPicture() {
   if (s->set_gain_ctrl) s->set_gain_ctrl(s, 1);
   if (s->set_whitebal) s->set_whitebal(s, 1);
   if (s->set_awb_gain) s->set_awb_gain(s, 1);
-  // Brighter and more colourful: aim the auto exposure a step brighter, lift
-  // brightness and contrast a little and colour two steps (the default looks washed out).
-  if (s->set_ae_level) s->set_ae_level(s, 1);
+  // Brighter and more colourful, done in the picture processor (brightness, contrast,
+  // colour one step up each). The auto exposure target stays normal: aiming it
+  // brighter made exposures longer than a frame indoors, which made video stutter.
+  if (s->set_ae_level) s->set_ae_level(s, 0);
   if (s->set_brightness) s->set_brightness(s, 1);
   if (s->set_contrast) s->set_contrast(s, 1);
-  if (s->set_saturation) s->set_saturation(s, 2);
+  if (s->set_saturation) s->set_saturation(s, 1);
   // Enough gain for indoor light without too much grain, plus noise reduction.
   if (s->set_gainceiling) s->set_gainceiling(s, GAINCEILING_16X);
   if (s->set_denoise) s->set_denoise(s, 3);
@@ -343,6 +383,11 @@ bool jpegLooksWhole(const uint8_t *b, size_t len) {
   return false;
 }
 
+// The website's live camera view: a copy of a camera picture, sent in parts.
+uint8_t *camWebBuf = nullptr;
+volatile uint32_t camWebLen = 0, lastJpegBytes = 0;
+volatile bool camWebWanted = false, camWebReady = false, camStreamOn = false;
+
 // Takes a picture every 50 ms.
 void captureTask(void *) {
   TickType_t last = xTaskGetTickCount();
@@ -381,6 +426,13 @@ void captureTask(void *) {
           previewLen = fb->len;
           previewWanted = false;
         }
+        lastJpegBytes = fb->len;
+        if (camWebWanted && camWebBuf && fb->len <= SLOT_BYTES && (int32_t)(millis() - settleUntilMs) >= 0) {
+          memcpy(camWebBuf, fb->buf, fb->len);   // for the website's live view
+          camWebLen = fb->len;
+          camWebWanted = false;
+          camWebReady = true;
+        }
         esp_camera_fb_return(fb);
       }
     }
@@ -417,16 +469,18 @@ void imuTask(void *) {
     // leftover numbers in the sample, which showed up as a flat 4 g / 512 °/s.)
     bool ok = imu.getAccelerometer(s.ax, s.ay, s.az);
     ok = imu.getGyroscope(s.gx, s.gy, s.gz) && ok;
-    // A real sensor always jitters a little. Exactly the same six numbers for 2 s,
-    // or readings pinned at the end of the range, mean it has stopped measuring.
+    // A real sensor always jitters a little. Exactly the same six numbers for 3 s
+    // mean it has stopped measuring.
     float now6[6] = {s.ax, s.ay, s.az, s.gx, s.gy, s.gz};
     bool same = ok && memcmp(now6, prev, sizeof(prev)) == 0;
     memcpy(prev, now6, sizeof(prev));
-    bool pinned = ok && (fabsf(s.ax) >= 7.99f || fabsf(s.ay) >= 7.99f || fabsf(s.az) >= 7.99f ||
-                        fabsf(s.gx) >= 1023.9f || fabsf(s.gy) >= 1023.9f || fabsf(s.gz) >= 1023.9f);
     if (!ok) { imuReadErrors = imuReadErrors + 1; badStreak++; } else badStreak = 0;
-    sameStreak = same || pinned ? sameStreak + 1 : 0;
-    if (badStreak > hz / 2 + 2 || sameStreak > hz * 2 + 4) {   // restart the sensor
+    sameStreak = same ? sameStreak + 1 : 0;
+    // Restart the sensor, but at most once every 10 s, so a sensor that won't come
+    // back never keeps the shared I2C wires (also used by the camera) busy.
+    static uint32_t lastRestartMs = 0;
+    if ((badStreak > hz / 2 + 2 || sameStreak > hz * 3 + 4) && millis() - lastRestartMs > 10000) {
+      lastRestartMs = millis();
       imuRestarts = imuRestarts + 1;
       setupImu(false);
       badStreak = sameStreak = 0;
@@ -529,13 +583,15 @@ void wifiPoll() {
 
   // To the website
   if (Serial) {
-    Serial.print("{\"t\":\"wifi\",\"n\":[");
-    for (int i = 0; i < netCount; i++) {
+    static char line[OUT_MAX];
+    int len = snprintf(line, sizeof(line), "{\"t\":\"wifi\",\"n\":[");
+    for (int i = 0; i < netCount && len < (int)sizeof(line) - 100; i++) {
       const uint8_t *b = nets[i].bssid;
-      Serial.printf("%s[\"%s\",%d,%d,%d,\"%02X:%02X:%02X:%02X:%02X:%02X\"]", i ? "," : "", nets[i].ssid, nets[i].rssi, nets[i].ch,
-                    nets[i].open ? 1 : 0, b[0], b[1], b[2], b[3], b[4], b[5]);
+      len += snprintf(line + len, sizeof(line) - len, "%s[\"%s\",%d,%d,%d,\"%02X:%02X:%02X:%02X:%02X:%02X\"]", i ? "," : "",
+                      nets[i].ssid, nets[i].rssi, nets[i].ch, nets[i].open ? 1 : 0, b[0], b[1], b[2], b[3], b[4], b[5]);
     }
-    Serial.println("]}");
+    len += snprintf(line + len, sizeof(line) - len, "]}\n");
+    out(line, len);
   }
   // To the card, while recording
   if (recording && !stopAsked && !wifiRowsReady) {
@@ -726,7 +782,7 @@ void startRecording() {
   if (videoOn()) resetQuality();
   droppedAtCheck = 0;
   recording = true;
-  Serial.printf("Recording %s: video %s, motion %d Hz\n", baseName, videoOn() ? SIZES[sizeIdx].name : "off",
+  outf("Recording %s: video %s, motion %d Hz\n", baseName, videoOn() ? SIZES[sizeIdx].name : "off",
                 imuOn() ? RATES[rateIdx] : 0);
 }
 
@@ -779,7 +835,7 @@ void stopRecording() {
   writeInfoFile(secs);
   snprintf(lastSaved, sizeof(lastSaved), "%s  (%.0f s)", baseName + 5, secs);
   sdFreeMB = (SD_MMC.totalBytes() - SD_MMC.usedBytes()) / (1024 * 1024);
-  Serial.printf("Saved %s: %lu frames (%lu lost), %lu motion rows (%lu lost), %.1f s\n", baseName,
+  outf("Saved %s: %lu frames (%lu lost), %lu motion rows (%lu lost), %.1f s\n", baseName,
                 (unsigned long)framesSaved, (unsigned long)framesDropped, (unsigned long)samplesSaved,
                 (unsigned long)samplesDropped, secs);
   say(writeFailed ? "Stopped: the card is full or was removed." : "Saved!");
@@ -1090,16 +1146,80 @@ void readCommands() {
       int tz = 0;
       if (sscanf(cmdBuf, "settime %lld %d", &ms, &tz) >= 1 && ms > 1700000000000LL) setClock(ms, tz);
       else if (!strcmp(cmdBuf, "version"))
-        Serial.printf("{\"t\":\"hi\",\"app\":\"recorder\",\"build\":\"%s\"}\n", FIRMWARE_BUILD);
+        outf("{\"t\":\"hi\",\"app\":\"recorder\",\"build\":\"%s\"}\n", FIRMWARE_BUILD);
+      else if (!strcmp(cmdBuf, "cam 1")) camStreamOn = true;    // the website wants the live picture
+      else if (!strcmp(cmdBuf, "cam 0")) camStreamOn = false;
     } else if (cmdLen < (int)sizeof(cmdBuf) - 1) {
       cmdBuf[cmdLen++] = c;
     }
   }
 }
 
+// ---- The only task that writes to USB ----
+// Sends the queued data lines first (they're small and time-sensitive), and in
+// between them the camera picture as base64 in parts of 2400 bytes:
+//   {"t":"cj","i":<picture number>,"p":<part>,"n":<parts>,"d":"<base64>"}
+// Up to 5 pictures a second, only while the website asks for them ("cam 1").
+const size_t CAM_CHUNK = 2400;   // a multiple of 3, so each part is whole base64
+
+void serialTask(void *) {
+  static char msg[OUT_MAX];
+  static char line[CAM_CHUNK * 4 / 3 + 96];
+  uint32_t camSeq = 0, lastCamMs = 0;
+  size_t camLen = 0, camPos = 0;
+  int part = 0, parts = 0;
+  while (true) {
+    bool camBusy = camPos < camLen;
+    size_t n = xMessageBufferReceive(serialMB, msg, sizeof(msg), camBusy ? 0 : pdMS_TO_TICKS(5));
+    if (n) { if (Serial) outWrite(msg, n); continue; }
+    if (camBusy) {
+      if (!Serial) { camLen = camPos = 0; continue; }
+      size_t take = min(CAM_CHUNK, camLen - camPos);
+      int h = snprintf(line, sizeof(line), "{\"t\":\"cj\",\"i\":%lu,\"p\":%d,\"n\":%d,\"d\":\"", (unsigned long)camSeq, part, parts);
+      size_t olen = 0;
+      if (mbedtls_base64_encode((unsigned char *)line + h, sizeof(line) - h - 4, &olen, camWebBuf + camPos, take) != 0) {
+        camLen = camPos = 0;
+        continue;
+      }
+      h += olen;
+      line[h++] = '"'; line[h++] = '}'; line[h++] = '\n';
+      outWrite(line, h);
+      camPos += take;
+      part++;
+      continue;
+    }
+    if (camWebReady) {   // a new picture to send
+      camLen = camWebLen; camPos = 0; part = 0;
+      parts = (camLen + CAM_CHUNK - 1) / CAM_CHUNK;
+      camSeq++;
+      camWebReady = false;
+      continue;
+    }
+    if (camStreamOn && camOk && videoOn() && Serial && !camWebWanted && millis() - lastCamMs >= 200) {
+      lastCamMs = millis();
+      camWebWanted = true;
+    }
+  }
+}
+
+// Everything the screen's status lines show, for the website, once a second.
+void sendStatus() {
+  uint32_t secs = recording ? (millis() - recStartMs) / 1000 : 0;
+  outf("{\"t\":\"rs\",\"rec\":%d,\"secs\":%lu,\"video\":\"%s\",\"hz\":%d,\"cfps\":%.1f,\"sfps\":%.1f,\"q\":%d,\"dmg\":%lu,"
+       "\"fs\":%lu,\"fl\":%lu,\"mb\":%.1f,\"mr\":%lu,\"ml\":%lu,\"fix\":%lu,\"ierr\":%lu,\"sd\":%d,\"sdmsg\":\"%s\",\"free\":%llu,"
+       "\"clock\":%d,\"wifi\":%d,\"jpeg\":%lu,\"file\":\"%s\",\"orient\":%d}\n",
+       recording ? 1 : 0, (unsigned long)secs, videoOn() ? SIZES[sizeIdx].name : "off", imuOn() ? RATES[rateIdx] : 0,
+       cameraFps, previewFps, quality, (unsigned long)damagedFrames,
+       (unsigned long)framesSaved, (unsigned long)framesDropped, bytesSaved / 1048576.0f,
+       (unsigned long)(samplesSaved + (recording ? head_ - tail_ : 0)), (unsigned long)samplesDropped,
+       (unsigned long)imuRestarts, (unsigned long)imuReadErrors, sdOk ? 1 : 0, sdProblem, (unsigned long long)sdFreeMB,
+       clockKnown ? 1 : 0, wifiOn ? 1 : 0, (unsigned long)lastJpegBytes, recording ? baseName : lastSaved, orient);
+}
+
 // ============================================================ setup & loop
 
 void setup() {
+  Serial.setTxBufferSize(8192);   // room for a whole camera part at once
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
   BoardStatus st = boardPowerUp(expander, pmu);   // also powers the camera (power chip BLDO1/BLDO2)
@@ -1117,7 +1237,7 @@ void setup() {
     bool readOk = imu.getAccelerometer(ax, ay, az);
     float total = sqrtf(ax * ax + ay * ay + az * az);
     if (!readOk || total < 0.3f || total > 3.0f) { delay(50); imuOk = setupImu(false); }
-    Serial.printf("[imu] first reading %.2f %.2f %.2f g (total %.2f)\n", ax, ay, az, total);
+    outf("[imu] first reading %.2f %.2f %.2f g (total %.2f)\n", ax, ay, az, total);
   }
 
   prefs.begin("recorder", false);
@@ -1142,11 +1262,14 @@ void setup() {
   camOk = slotMem && previewBuf && startCamera();
   mountCard();
 
-  Serial.printf("[boot] Recorder build %s | PSRAM %s (%u KB free) | camera %s | motion sensor %s | clock %s | touch %s | SD %s\n",
+  outf("[boot] Recorder build %s | PSRAM %s (%u KB free) | camera %s | motion sensor %s | clock %s | touch %s | SD %s\n",
                 FIRMWARE_BUILD, st.psram ? "found" : "NOT FOUND", (unsigned)(ESP.getFreePsram() / 1024),
                 camOk ? "ok" : "FAILED", imuOk ? "ok" : "MISSING", clockKnown ? "set" : (rtcOk ? "not set" : "MISSING"),
                 touchOk ? "ok" : "MISSING", sdOk ? "ok" : sdProblem);
 
+  camWebBuf = (uint8_t *)ps_malloc(SLOT_BYTES);
+  serialMB = xMessageBufferCreate(16384);
+  if (serialMB) xTaskCreatePinnedToCore(serialTask, "usb", 6144, nullptr, 1, nullptr, 1);
   if (imuOk) xTaskCreatePinnedToCore(imuTask, "imu", 4096, nullptr, configMAX_PRIORITIES - 1, nullptr, 0);
   xTaskCreatePinnedToCore(captureTask, "capture", 4096, nullptr, configMAX_PRIORITIES - 2, nullptr, 0);
   xTaskCreatePinnedToCore(writerTask, "writer", 8192, nullptr, configMAX_PRIORITIES - 3, nullptr, 1);
@@ -1207,9 +1330,11 @@ void loop() {
     portENTER_CRITICAL(&latestLock);
     s = latest;
     portEXIT_CRITICAL(&latestLock);
-    Serial.printf("{\"t\":\"imu\",\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,\"gx\":%.1f,\"gy\":%.1f,\"gz\":%.1f}\n",
+    outf("{\"t\":\"imu\",\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,\"gx\":%.1f,\"gy\":%.1f,\"gz\":%.1f}\n",
                   s.ax, s.ay, s.az, s.gx, s.gy, s.gz);
   }
+  static uint32_t lastStatus = 0;
+  if (Serial && millis() - lastStatus >= 1000) { lastStatus = millis(); sendStatus(); }
   if (!sdOk && !recording && millis() - lastCardCheck > 4000) { lastCardCheck = millis(); mountCard(); }
   wifiPoll();
   if (!screenOk) { delay(5); return; }
