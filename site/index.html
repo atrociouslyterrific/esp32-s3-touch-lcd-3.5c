@@ -1338,7 +1338,7 @@ async function restoreFrom(file) {
 
 // ---------- Web Serial ----------
 const connectBtn = document.getElementById("connectBtn");
-let port = null, reading = false;
+let port = null, reading = false, activeReader = null, readDone = null;
 
 function setConnected(on, text) {
   document.getElementById("dot").classList.toggle("on", on);
@@ -1381,6 +1381,7 @@ async function readLoop() {
   const dec = new TextDecoderStream();
   const done = port.readable.pipeTo(dec.writable).catch(() => {});
   const reader = dec.readable.getReader();
+  activeReader = reader; readDone = done;
   let buf = "";
   try {
     while (reading) {
@@ -1400,6 +1401,11 @@ async function readLoop() {
 async function disconnect() {
   reading = false;
   const p = port; port = null;
+  // Stop reading first: a port that is still being read can't be closed, so it stayed
+  // locked to this page.
+  try { if (activeReader) await activeReader.cancel(); } catch (e) {}
+  try { if (readDone) await readDone; } catch (e) {}
+  activeReader = null; readDone = null;
   try { if (writer) { await writer.close(); } } catch (e) {}
   writer = null;
   try { await p.close(); } catch (e) {}
