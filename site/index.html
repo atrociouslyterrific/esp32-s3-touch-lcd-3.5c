@@ -879,6 +879,9 @@ function handleLine(line) {
     if (history.length % 10 === 0) saveHistory();
   } else if (m.t === "q" && Array.isArray(m.q) && m.q.length === NUM_STATES * NA) {
     q = m.q;
+  } else if (m.t === "clock") {
+    addBoardLine("Board clock set to " + m.set + " (your time)");
+    return;
   } else if (m.t === "saved") {
     if (savedWaiter) { const w = savedWaiter; savedWaiter = null; w(); }
     return;
@@ -909,6 +912,7 @@ const OLD_FIRMWARE = "Bloop on your board is older than this page (it doesn't kn
 function onVersion(m) {
   boardBuild = m.build;
   clearTimeout(versionTimer);
+  if (m.app === "recorder") { setText("statusText", "Connected: Recorder build " + m.build); return; }
   if (m.app !== "bloop") { setText("statusText", "Connected (not Bloop)"); return; }
   const same = m.build === BUILD || BUILD.startsWith("__");
   setText("statusText", "Connected: Bloop build " + m.build + (same ? "" : " (update available)"));
@@ -998,6 +1002,8 @@ async function connect() {
     setConnected(true, "Connected: listening");
     send("brain");
     askVersion();
+    // Set the board's clock (the recorder uses it to timestamp recordings).
+    send("settime " + Date.now() + " " + (-new Date().getTimezoneOffset()));
     readLoop();
   } catch (e) {
     port = null;
