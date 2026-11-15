@@ -64,11 +64,11 @@ jobs:
         run: |
           arduino-cli core update-index --additional-urls "$ESP32_URL"
           arduino-cli core install esp32:esp32@3.3.12 --additional-urls "$ESP32_URL"
-          arduino-cli lib install "GFX Library for Arduino@1.6.9" "SensorLib@0.3.1" "TCA9554@0.1.2" "XPowersLib@0.2.9"
+          arduino-cli lib install "GFX Library for Arduino@1.6.9" "SensorLib@0.3.1" "TCA9554@0.1.2" "XPowersLib@0.2.9" "JPEGDEC@1.8.5"
 
       - name: Compile the sketches
         run: |
-          for sketch in hello_touch bloop_room imu_recorder; do
+          for sketch in hello_touch bloop_room imu_recorder camera_recorder; do
             # Stamp this build's version into the program (the board reports it to the website).
             echo "#define FIRMWARE_BUILD \"${GITHUB_SHA::7}\"" > "$sketch/build_info.h"
             echo "::group::$sketch"
@@ -86,7 +86,7 @@ jobs:
           BOOT_APP0="$(find ~/.arduino15/packages/esp32/hardware/esp32 -name boot_app0.bin | head -1)"
           cp "$BOOT_APP0" _site/firmware/boot_app0.bin
           # Separate parts (not one merged file) so updating never wipes Bloop's saved brain.
-          for sketch in bloop_room hello_touch imu_recorder; do
+          for sketch in bloop_room hello_touch imu_recorder camera_recorder; do
             B=build/$sketch
             cp "$B/$sketch.ino.bootloader.bin" _site/firmware/$sketch-bootloader.bin
             cp "$B/$sketch.ino.partitions.bin" _site/firmware/$sketch-partitions.bin
@@ -113,10 +113,11 @@ jobs:
           write_manifest manifest.json "Bloop's Room" bloop_room
           write_manifest manifest-hello.json "Screen and touch test" hello_touch
           write_manifest manifest-imu.json "IMU Recorder" imu_recorder
+          write_manifest manifest-cam.json "Camera Recorder" camera_recorder
           # Browsers keep GitHub Pages files for 10 minutes. Stamp this build into the
           # page's links so a new build is never mixed up with a cached older one.
           V="${GITHUB_SHA::7}"
-          sed -i "s|manifest=\"manifest.json\"|manifest=\"manifest.json?v=$V\"|; s|manifest=\"manifest-hello.json\"|manifest=\"manifest-hello.json?v=$V\"|; s|manifest=\"manifest-imu.json\"|manifest=\"manifest-imu.json?v=$V\"|; s|__BUILD__|$V|g" _site/index.html
+          sed -i "s|manifest=\"manifest.json\"|manifest=\"manifest.json?v=$V\"|; s|manifest=\"manifest-hello.json\"|manifest=\"manifest-hello.json?v=$V\"|; s|manifest=\"manifest-imu.json\"|manifest=\"manifest-imu.json?v=$V\"|; s|manifest=\"manifest-cam.json\"|manifest=\"manifest-cam.json?v=$V\"|; s|__BUILD__|$V|g" _site/index.html
           grep -n "manifest.*?v=\|BUILD = " _site/index.html
           cat _site/manifest.json _site/manifest-hello.json
           ls -la _site _site/firmware

@@ -30,6 +30,7 @@ Bloop is a pet that lives in a room you can tip over, and it learns by itself.
 |---|---|
 | `bloop_room` | Bloop's Room (above). |
 | `imu_recorder` | **IMU Recorder.** Records the motion sensor (acceleration and rotation) to a microSD card. Pick 25, 50, 100 or 200 samples a second and tap REC; live graphs show the data. Each recording is a CSV file in the card's `/imu` folder (`rec_0001_100Hz.csv`) with columns `time_s, ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps` (±8 g, ±1024 °/s, the sensor chip's own axes). Saved every second, so a power cut loses at most a second. Install it from the website. |
+| `camera_recorder` | **Camera Recorder.** Records video from the board's OV5640 camera to a microSD card at 20 frames a second, with a live preview on the screen. Pick 640×480, 800×600 or 1280×720 and tap REC. Videos are MJPEG `.avi` files in the card's `/video` folder (`vid_0001.avi`) that play in VLC, QuickTime and most players. The screen shows the frame rate it really achieves (big sizes may be lower if the card can't keep up); the file is stamped with that real rate so it plays at the right speed. Up to 60 minutes per video. Install it from the website. |
 | `hello_touch` | Screen and touch test. Shows a title and color bars, prints the touch position, and lets you draw with your finger. Tap a swatch to change the pen color, or **CLEAR** to wipe the screen. |
 
 ## Hardware
