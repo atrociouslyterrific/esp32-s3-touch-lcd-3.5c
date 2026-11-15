@@ -459,7 +459,7 @@ volatile uint32_t imuReadErrors = 0, imuRestarts = 0;
 // in one I2C transfer, so both come from the same moment. Readings seen on the
 // board sometimes came back scrambled (gravity on the wrong axis and the other
 // axes exactly 0); those are recognised and thrown away.
-bool readImu(Sample &s) {
+bool readImu(float *v) {   // v: ax, ay, az (g), gx, gy, gz (deg/s)
   const uint8_t ADDR = QMI8658_L_SLAVE_ADDRESS, FIRST = 0x35;
   uint8_t b[12];
   for (int attempt = 0; attempt < 2; attempt++) {
@@ -477,8 +477,8 @@ bool readImu(Sample &s) {
     int accZeros = (r[0] == 0) + (r[1] == 0) + (r[2] == 0);
     int gyrZeros = (r[3] == 0) + (r[4] == 0) + (r[5] == 0);
     if (accZeros >= 2 || gyrZeros >= 2) continue;
-    s.ax = r[0] / 4096.0f; s.ay = r[1] / 4096.0f; s.az = r[2] / 4096.0f;   // ±8 g
-    s.gx = r[3] / 32.0f;   s.gy = r[4] / 32.0f;   s.gz = r[5] / 32.0f;     // ±1024 °/s
+    for (int i = 0; i < 3; i++) v[i] = r[i] / 4096.0f;      // ±8 g
+    for (int i = 3; i < 6; i++) v[i] = r[i] / 32.0f;        // ±1024 °/s
     return true;
   }
   return false;
@@ -496,7 +496,9 @@ void imuTask(void *) {
     s.tUs = (uint32_t)esp_timer_get_time();
     // Only keep readings the sensor really gave us. (Before, a failed read left
     // leftover numbers in the sample, which showed up as a flat 4 g / 512 °/s.)
-    bool ok = readImu(s);
+    float v[6];
+    bool ok = readImu(v);
+    if (ok) { s.ax = v[0]; s.ay = v[1]; s.az = v[2]; s.gx = v[3]; s.gy = v[4]; s.gz = v[5]; }
     // A real sensor always jitters a little. Exactly the same six numbers for 3 s
     // mean it has stopped measuring.
     float now6[6] = {s.ax, s.ay, s.az, s.gx, s.gy, s.gz};
