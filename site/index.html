@@ -19,6 +19,8 @@
   --border: rgba(11,11,11,0.10);
   --series-1: #2a78d6;
   --series-1-soft: rgba(42,120,214,0.18);
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
   --div-pos: #2a78d6;
   --div-neg: #e34948;
   --div-mid: #f0efec;
@@ -41,6 +43,8 @@
     --border: rgba(255,255,255,0.10);
     --series-1: #3987e5;
     --series-1-soft: rgba(57,135,229,0.22);
+    --series-2: #d95926;
+    --series-3: #199e70;
     --div-pos: #3987e5;
     --div-neg: #e66767;
     --div-mid: #383835;
@@ -53,7 +57,7 @@
   color-scheme: dark;
   --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
   --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
-  --series-1: #3987e5; --series-1-soft: rgba(57,135,229,0.22);
+  --series-1: #3987e5; --series-1-soft: rgba(57,135,229,0.22); --series-2: #d95926; --series-3: #199e70;
   --div-pos: #3987e5; --div-neg: #e66767; --div-mid: #383835; --accent: #199e70;
   --btn: #f0efec; --btn-ink: #0b0b0b;
 }
@@ -184,6 +188,14 @@ a { color: var(--series-1); }
         <li>Charts appear as Bloop makes choices, one every couple of seconds.</li>
       </ol>
       <p class="warn" id="noSerial" hidden>This browser can't talk to USB devices. Use Chrome or Edge on a computer.</p>
+    </section>
+
+    <section class="card span-12">
+      <h2>Accelerometer (live)</h2>
+      <p class="note">Straight from the board's motion sensor while it's connected (Recorder or Bloop), last 10 seconds. In g: lying flat and still, one axis reads about 1 g (that's gravity) and the others about 0. Hover the graph to read any moment.</p>
+      <div class="row" id="imuLegend" style="gap:18px;margin-bottom:6px;font-size:14px"></div>
+      <div class="chart" id="imuChart"></div>
+      <p class="note" id="imuExtra" style="margin:6px 0 0"></p>
     </section>
 
     <section class="card span-12">
@@ -844,7 +856,82 @@ function drawSayLog() {
   });
 }
 
-function redrawAll() { drawVoiceDiagram(); drawVoiceLoss(); drawVoiceStats(); drawSayLog(); drawBrainDiagram(); drawLoopDiagram(); drawRewardChart(); drawNow(); drawMix(); drawHabits(); drawHeat(); drawRecent(); drawLog(); }
+// ---------- live accelerometer ----------
+const IMU_WINDOW_MS = 10000;
+const IMU_AXES = [["ax", "x", "--series-1"], ["ay", "y", "--series-2"], ["az", "z", "--series-3"]];
+let imuData = [], imuLast = null, imuDrawPending = false, imuHoverX = null;
+
+function onImu(m) {
+  const t = performance.now();
+  imuLast = Object.assign({ t }, m);
+  imuData.push(imuLast);
+  while (imuData.length && imuData[0].t < t - IMU_WINDOW_MS) imuData.shift();
+  if (!imuDrawPending) {   // at most ~12 redraws a second
+    imuDrawPending = true;
+    setTimeout(() => { imuDrawPending = false; drawImu(); }, 80);
+  }
+}
+
+function drawImu() {
+  const legend = document.getElementById("imuLegend");
+  const box = document.getElementById("imuChart");
+  legend.replaceChildren();
+  box.replaceChildren();
+  if (!imuData.length) {
+    const d = document.createElement("div"); d.className = "empty";
+    d.textContent = "Connect a board (Recorder or Bloop) to see its accelerometer here.";
+    box.appendChild(d);
+    setText("imuExtra", "");
+    return;
+  }
+  // Legend with the current values (identity by colour swatch + label, values in ink)
+  IMU_AXES.forEach(([k, name, col]) => {
+    const item = document.createElement("span");
+    item.style.display = "inline-flex"; item.style.alignItems = "center"; item.style.gap = "6px";
+    const sw = document.createElement("span");
+    sw.style.cssText = `width:14px;height:3px;border-radius:2px;background:var(${col})`;
+    const label = document.createElement("span");
+    label.textContent = name + "  " + (imuLast[k] >= 0 ? "+" : "") + imuLast[k].toFixed(2) + " g";
+    label.style.fontVariantNumeric = "tabular-nums";
+    item.append(sw, label);
+    legend.appendChild(item);
+  });
+  const mag = Math.hypot(imuLast.ax, imuLast.ay, imuLast.az);
+  setText("imuExtra", "Total: " + mag.toFixed(2) + " g" +
+    (imuLast.gx !== undefined ? "   ·   rotation x " + imuLast.gx.toFixed(0) + ", y " + imuLast.gy.toFixed(0) + ", z " + imuLast.gz.toFixed(0) + " °/s" : ""));
+
+  const W = 980, H = 220, m = { l: 40, r: 14, t: 10, b: 24 };
+  const now = imuData[imuData.length - 1].t, t0 = now - IMU_WINDOW_MS;
+  let lim = 2;
+  for (const p of imuData) for (const [k] of IMU_AXES) lim = Math.max(lim, Math.ceil(Math.abs(p[k])));
+  const X = t => m.l + (t - t0) / IMU_WINDOW_MS * (W - m.l - m.r);
+  const Y = v => m.t + (1 - (v + lim) / (2 * lim)) * (H - m.t - m.b);
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Accelerometer x, y and z over the last 10 seconds" }, box);
+  for (const v of niceTicks(-lim, lim, 4)) {
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: v === 0 ? cssVar("--axis") : cssVar("--grid") }, svg);
+    svgText(svg, m.l - 6, Y(v) + 4, (v > 0 ? "+" : "") + v, { "text-anchor": "end", "font-size": 11, fill: cssVar("--muted") });
+  }
+  for (let s = 0; s <= 10; s += 2)
+    svgText(svg, X(now - s * 1000), H - 6, s ? "-" + s + " s" : "now", { "text-anchor": "middle", "font-size": 11, fill: cssVar("--muted") });
+  IMU_AXES.forEach(([k, , col]) => {
+    const pts = imuData.map(p => X(p.t).toFixed(1) + "," + Y(p[k]).toFixed(1)).join(" ");
+    el("polyline", { points: pts, fill: "none", stroke: cssVar(col), "stroke-width": 2, "stroke-linejoin": "round" }, svg);
+  });
+  // Hover: crosshair + all three values at that moment
+  const cross = el("line", { y1: m.t, y2: H - m.b, stroke: cssVar("--axis"), visibility: "hidden" }, svg);
+  const hit = el("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, fill: "transparent" }, svg);
+  hit.addEventListener("pointermove", e => {
+    const r = svg.getBoundingClientRect(), vx = (e.clientX - r.left) / r.width * W;
+    let best = imuData[0];
+    for (const p of imuData) if (Math.abs(X(p.t) - vx) < Math.abs(X(best.t) - vx)) best = p;
+    cross.setAttribute("x1", X(best.t)); cross.setAttribute("x2", X(best.t)); cross.setAttribute("visibility", "visible");
+    showTip(e, [((now - best.t) / 1000).toFixed(1) + " s ago",
+      "x " + best.ax.toFixed(3) + " g", "y " + best.ay.toFixed(3) + " g", "z " + best.az.toFixed(3) + " g"]);
+  });
+  hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); hideTip(); });
+}
+
+function redrawAll() { drawImu(); drawVoiceDiagram(); drawVoiceLoss(); drawVoiceStats(); drawSayLog(); drawBrainDiagram(); drawLoopDiagram(); drawRewardChart(); drawNow(); drawMix(); drawHabits(); drawHeat(); drawRecent(); drawLog(); }
 
 // ---------- data in ----------
 let drawQueued = false;
@@ -879,6 +966,9 @@ function handleLine(line) {
     if (history.length % 10 === 0) saveHistory();
   } else if (m.t === "q" && Array.isArray(m.q) && m.q.length === NUM_STATES * NA) {
     q = m.q;
+  } else if (m.t === "imu") {
+    onImu(m);
+    return;
   } else if (m.t === "clock") {
     addBoardLine("Board clock set to " + m.set + " (your time)");
     return;

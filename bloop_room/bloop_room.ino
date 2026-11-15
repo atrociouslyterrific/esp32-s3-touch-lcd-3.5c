@@ -2018,6 +2018,13 @@ void loop() {
   readTouch(dt);
   readCommands();
 
+  // Live accelerometer for the website, 10 times a second (only while connected).
+  static uint32_t lastImuSend = 0;
+  if (imuOk && Serial && now - lastImuSend >= 100) {
+    lastImuSend = now;
+    Serial.printf("{\"t\":\"imu\",\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f}\n", rawA[0], rawA[1], rawA[2]);
+  }
+
   if (screen == SCR_CAL) {
     drawCal();
     cv->flush();

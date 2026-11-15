@@ -375,18 +375,35 @@ void imuTask(void *) {
 static inline float secsSinceStart(uint32_t tUs) { return (uint32_t)(tUs - recStartUs) / 1e6f; }
 static inline long long unixAt(uint32_t tUs) { return recStartUnixMs + (uint32_t)(tUs - recStartUs) / 1000; }
 
+// Readable local time with milliseconds, e.g. "2026-11-14 19:05:12.345".
+// The date part only changes once a second, so it's worked out once a second.
+const char *localStamp(long long unixMs) {
+  static long long cachedSec = -1;
+  static char datePart[24];
+  static char out[32];
+  long long sec = unixMs / 1000;
+  if (sec != cachedSec) {
+    cachedSec = sec;
+    formatLocal(sec * 1000, datePart, sizeof(datePart), false);
+  }
+  snprintf(out, sizeof(out), "%s.%03d", datePart, (int)(unixMs % 1000));
+  return out;
+}
+
 void writeImuSamples() {
   if (!imuFile) return;
   static char buf[8192];
   int n = 0;
   while (tail_ != head_) {
     const Sample &s = ring[tail_ % RING];
-    if (clockKnown)
-      n += snprintf(buf + n, sizeof(buf) - n, "%.4f,%lld,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f\n",
-                    secsSinceStart(s.tUs), unixAt(s.tUs), s.ax, s.ay, s.az, s.gx, s.gy, s.gz);
-    else
-      n += snprintf(buf + n, sizeof(buf) - n, "%.4f,,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f\n",
+    if (clockKnown) {
+      long long u = unixAt(s.tUs);
+      n += snprintf(buf + n, sizeof(buf) - n, "%.4f,%lld,%s,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f\n",
+                    secsSinceStart(s.tUs), u, localStamp(u), s.ax, s.ay, s.az, s.gx, s.gy, s.gz);
+    } else {
+      n += snprintf(buf + n, sizeof(buf) - n, "%.4f,,,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f\n",
                     secsSinceStart(s.tUs), s.ax, s.ay, s.az, s.gx, s.gy, s.gz);
+    }
     tail_ = tail_ + 1;
     samplesSaved = samplesSaved + 1;
     if (n > (int)sizeof(buf) - 120) {
@@ -408,10 +425,11 @@ void writerTask(void *) {
     if (got) {
       if (!writeFailed) {
         if (avi.addFrame(slotMem + (size_t)slot * SLOT_BYTES, slotLen[slot])) {
-          char line[48];
+          char line[80];
+          long long u = unixAt(slotTimeUs[slot]);
           int n = clockKnown
-            ? snprintf(line, sizeof(line), "%lu,%.4f,%lld\n", (unsigned long)framesSaved, secsSinceStart(slotTimeUs[slot]), unixAt(slotTimeUs[slot]))
-            : snprintf(line, sizeof(line), "%lu,%.4f,\n", (unsigned long)framesSaved, secsSinceStart(slotTimeUs[slot]));
+            ? snprintf(line, sizeof(line), "%lu,%.4f,%lld,%s\n", (unsigned long)framesSaved, secsSinceStart(slotTimeUs[slot]), u, localStamp(u))
+            : snprintf(line, sizeof(line), "%lu,%.4f,,\n", (unsigned long)framesSaved, secsSinceStart(slotTimeUs[slot]));
           frameFile.write((const uint8_t *)line, n);
           framesSaved = framesSaved + 1;
           bytesSaved = bytesSaved + slotLen[slot] + 8;
@@ -484,7 +502,7 @@ void startRecording() {
     }
     snprintf(path, sizeof(path), "%s_frames.csv", baseName);
     frameFile = SD_MMC.open(path, FILE_WRITE);
-    if (frameFile) frameFile.print("frame,time_s,unix_ms\n");
+    if (frameFile) frameFile.print("frame,time_s,unix_ms,local_time\n");
   }
   if (imuOn()) {
     snprintf(path, sizeof(path), "%s_imu.csv", baseName);
@@ -494,7 +512,7 @@ void startRecording() {
       if (videoOn()) { avi.end(0); if (frameFile) frameFile.close(); }
       return;
     }
-    imuFile.print("time_s,unix_ms,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps\n");
+    imuFile.print("time_s,unix_ms,local_time,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps\n");
   }
 
   framesSaved = 0; framesDropped = 0; bytesSaved = 0; samplesSaved = 0; samplesDropped = 0;
@@ -915,6 +933,18 @@ void loop() {
   readCommands();
   if (recording && (writeFailed || (millis() - recStartMs) / 1000 >= MAX_SECONDS)) stopRecording();
   autoQuality();
+
+  // Live motion readings for the website, 20 times a second (only while connected).
+  static uint32_t lastStream = 0;
+  if (imuOk && Serial && millis() - lastStream >= 50) {
+    lastStream = millis();
+    Sample s;
+    portENTER_CRITICAL(&latestLock);
+    s = latest;
+    portEXIT_CRITICAL(&latestLock);
+    Serial.printf("{\"t\":\"imu\",\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,\"gx\":%.1f,\"gy\":%.1f,\"gz\":%.1f}\n",
+                  s.ax, s.ay, s.az, s.gx, s.gy, s.gz);
+  }
   if (!sdOk && !recording && millis() - lastCardCheck > 4000) { lastCardCheck = millis(); mountCard(); }
   if (!screenOk) { delay(5); return; }
 
