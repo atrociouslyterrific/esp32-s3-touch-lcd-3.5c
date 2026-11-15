@@ -242,7 +242,10 @@ a { color: var(--series-1); }
     <section class="card span-12">
       <div class="row" style="justify-content:space-between;margin-bottom:4px">
         <h2 style="margin:0">Nearby Wi-Fi</h2>
-        <button class="ghost" id="wifiCsvBtn" disabled>Download scans (CSV)</button>
+        <div class="row">
+          <button id="wifiToggleBtn" disabled>Start scanning</button>
+          <button class="ghost" id="wifiCsvBtn" disabled>Download scans (CSV)</button>
+        </div>
       </div>
       <p class="note" id="wifiNote">Turn on <b>Wi-Fi</b> in the Recorder (bottom row of buttons) while connected, and the networks it hears show up here, every 5 seconds. Strongest first. The board only listens; it doesn't join any network.</p>
       <table class="recent">
@@ -1105,7 +1108,23 @@ function recTile(label, value, hint, bad, small) {
 
 function mmss(s) { return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
 
+// Wi-Fi scanning on the board, switched from the website (or the board's own button).
+let boardWifiOn = false;
+document.getElementById("wifiToggleBtn").addEventListener("click", () => {
+  send(boardWifiOn ? "wifi 0" : "wifi 1");
+  setText("wifiNote", boardWifiOn ? "Stopping…" : "Starting… the first list arrives in a few seconds.");
+});
+function showWifiState(s) {
+  boardWifiOn = !!s.wifi;
+  const b = document.getElementById("wifiToggleBtn");
+  b.disabled = false;
+  b.textContent = s.wifi ? "Stop scanning" : "Start scanning";
+  if (!s.wifi) setText("wifiNote", "Wi-Fi scanning is off on the board. Click Start scanning (or tap Wi-Fi on the board). While it's on, the board's screen shows the list instead of the camera; recording carries on.");
+  else if (s.wfail && !s.wscan) setText("wifiNote", "The board's Wi-Fi scans keep failing (" + s.wfail + " so far).");
+}
+
 function onRecStatus(s) {
+  showWifiState(s);
   const now = performance.now();
   const webFps = camShown.length > 1 ? (camShown.length - 1) / ((camShown[camShown.length - 1] - camShown[0]) / 1000) : 0;
   const recent = camShown.length && camShown[camShown.length - 1] > now - 3000;
@@ -1128,7 +1147,7 @@ function onRecStatus(s) {
     recTile("Motion sensor", s.fix ? s.fix + " restarts" : "OK", s.ierr ? s.ierr + " failed reads skipped" : "no failed reads", s.fix > 0),
     recTile("SD card", s.sd ? "OK" : "Missing", s.sd ? (s.free ? (s.free / 1024).toFixed(1) + " GB free" : "") : s.sdmsg, !s.sd),
     recTile("Clock", s.clock ? "Set" : "Not set", s.clock ? "files named by date" : "connect sets it", !s.clock),
-    recTile("Wi-Fi scan", s.wifi ? "On" : "Off", s.wifi ? "list below" : "")
+    recTile("Wi-Fi scan", s.wifi ? "On" : "Off", s.wifi ? (s.nets || 0) + " networks, " + (s.wscan || 0) + " scans" + (s.wfail ? ", " + s.wfail + " failed" : "") : "list below", !!(s.wifi && s.wfail && !s.wscan))
   );
 }
 
@@ -1346,6 +1365,7 @@ function setConnected(on, text) {
   connectBtn.textContent = on ? "Disconnect" : "Connect to Bloop";
   document.querySelectorAll(".cmd").forEach(b => b.disabled = !on);
   document.getElementById("backupBtn").disabled = !on;
+  if (!on) document.getElementById("wifiToggleBtn").disabled = true;
   document.getElementById("restoreFile").disabled = !on;
   document.getElementById("restoreLabel").style.opacity = on ? 1 : 0.4;
 }

@@ -286,16 +286,23 @@ void applyPicture() {
   if (s->set_gain_ctrl) s->set_gain_ctrl(s, 1);
   if (s->set_whitebal) s->set_whitebal(s, 1);
   if (s->set_awb_gain) s->set_awb_gain(s, 1);
-  // Brighter and more colourful, done in the picture processor (brightness, contrast,
-  // colour one step up each). The auto exposure target stays normal: aiming it
-  // brighter made exposures longer than a frame indoors, which made video stutter.
+  // Normal exposure target, brightness and contrast; colour one step up.
   if (s->set_ae_level) s->set_ae_level(s, 0);
-  if (s->set_brightness) s->set_brightness(s, 1);
-  if (s->set_contrast) s->set_contrast(s, 1);
+  if (s->set_brightness) s->set_brightness(s, 0);
+  if (s->set_contrast) s->set_contrast(s, 0);
   if (s->set_saturation) s->set_saturation(s, 1);
-  // Enough gain for indoor light without too much grain, plus noise reduction.
-  if (s->set_gainceiling) s->set_gainceiling(s, GAINCEILING_16X);
-  if (s->set_denoise) s->set_denoise(s, 3);
+  // How much the sensor may amplify in dim light. NOT set_gainceiling(): for this
+  // camera the driver writes the setting's list number (0 to 6) straight into the
+  // limit register, which counts in sixteenths, so "16X" really capped the gain at
+  // about 0.2x. That kept the picture dark, and lifting the brightness afterwards
+  // made the sensor's faint row noise show as grainy lines. Register 0x3A18/0x3A19
+  // is the real limit in 1/16 steps: 0x0080 = 8x.
+  if (s->set_reg) {
+    s->set_reg(s, 0x3A18, 0xFF, 0x00);
+    s->set_reg(s, 0x3A19, 0xFF, 0x80);
+  }
+  // Noise reduction (driver levels 0 to 8).
+  if (s->set_denoise) s->set_denoise(s, 4);
   // Less banding under indoor lights: switch on the OV5640's light-flicker filter
   // (register 0x3A00 bit 5), which times the exposure to the mains flicker.
   if (s->set_reg) s->set_reg(s, 0x3A00, 0x20, 0x20);
@@ -546,7 +553,7 @@ const int MAX_NETS = 24;
 Net nets[MAX_NETS];
 int netCount = 0;
 bool wifiOn = false, wifiScanning = false, wifiListDirty = false;
-uint32_t wifiLastScanMs = 0, wifiScans = 0;
+uint32_t wifiLastScanMs = 0, wifiScans = 0, wifiFails = 0;
 int64_t wifiLastScanUnixMs = 0;
 // Rows waiting for the writer task (it owns the card)
 char wifiRows[6144];
@@ -595,7 +602,7 @@ void wifiPoll() {
   if (n == WIFI_SCAN_RUNNING) return;
   wifiScanning = false;
   wifiLastScanMs = millis();
-  if (n < 0) return;   // failed; try again in 5 s
+  if (n < 0) { wifiFails++; return; }   // failed; try again in 5 s
   netCount = 0;
   for (int i = 0; i < n && netCount < MAX_NETS; i++) {
     Net &w = nets[netCount++];
@@ -1182,6 +1189,8 @@ void readCommands() {
         outf("{\"t\":\"hi\",\"app\":\"recorder\",\"build\":\"%s\"}\n", FIRMWARE_BUILD);
       else if (!strcmp(cmdBuf, "cam 1")) camStreamOn = true;    // the website wants the live picture
       else if (!strcmp(cmdBuf, "cam 0")) camStreamOn = false;
+      else if (!strcmp(cmdBuf, "wifi 1")) { if (!wifiOn) { wifiSet(true); previewNeedsClear = true; } }   // from the website's button
+      else if (!strcmp(cmdBuf, "wifi 0")) { if (wifiOn) { wifiSet(false); previewNeedsClear = true; } }
     } else if (cmdLen < (int)sizeof(cmdBuf) - 1) {
       cmdBuf[cmdLen++] = c;
     }
@@ -1240,13 +1249,13 @@ void sendStatus() {
   uint32_t secs = recording ? (millis() - recStartMs) / 1000 : 0;
   outf("{\"t\":\"rs\",\"rec\":%d,\"secs\":%lu,\"video\":\"%s\",\"hz\":%d,\"cfps\":%.1f,\"sfps\":%.1f,\"q\":%d,\"dmg\":%lu,"
        "\"fs\":%lu,\"fl\":%lu,\"mb\":%.1f,\"mr\":%lu,\"ml\":%lu,\"fix\":%lu,\"ierr\":%lu,\"sd\":%d,\"sdmsg\":\"%s\",\"free\":%llu,"
-       "\"clock\":%d,\"wifi\":%d,\"jpeg\":%lu,\"file\":\"%s\",\"orient\":%d}\n",
+       "\"clock\":%d,\"wifi\":%d,\"wscan\":%lu,\"wfail\":%lu,\"nets\":%d,\"jpeg\":%lu,\"file\":\"%s\",\"orient\":%d}\n",
        recording ? 1 : 0, (unsigned long)secs, videoOn() ? SIZES[sizeIdx].name : "off", imuOn() ? RATES[rateIdx] : 0,
        cameraFps, previewFps, quality, (unsigned long)damagedFrames,
        (unsigned long)framesSaved, (unsigned long)framesDropped, bytesSaved / 1048576.0f,
        (unsigned long)(samplesSaved + (recording ? head_ - tail_ : 0)), (unsigned long)samplesDropped,
        (unsigned long)imuRestarts, (unsigned long)imuReadErrors, sdOk ? 1 : 0, sdProblem, (unsigned long long)sdFreeMB,
-       clockKnown ? 1 : 0, wifiOn ? 1 : 0, (unsigned long)lastJpegBytes, recording ? baseName : lastSaved, orient);
+       clockKnown ? 1 : 0, wifiOn ? 1 : 0, (unsigned long)wifiScans, (unsigned long)wifiFails, netCount, (unsigned long)lastJpegBytes, recording ? baseName : lastSaved, orient);
 }
 
 // ============================================================ setup & loop
